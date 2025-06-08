@@ -89,6 +89,15 @@ export const loader = async ({
   };
 };
 
+export function headers() {
+  return {
+    "X-Poi-Codename": "Asashio",
+    "X-Poi-Revision": __COMMIT_HASH__ ?? "development",
+    "X-Poi-Build-Date": __BUILD_DATE__,
+    "X-Poi-Greetings": "poi?",
+  };
+}
+
 export default async function CatchAll({ loaderData }: Route.ComponentProps) {
   const { data, splats, siteTitle, siteHost, siteDescription } = loaderData;
 
@@ -130,12 +139,12 @@ export default async function CatchAll({ loaderData }: Route.ComponentProps) {
       </section>
       <footer className="mt-16">
         <span>{`© ${new Date().getFullYear()} poi Contributors`}</span>
-        {import.meta.env.COMMIT_HASH && (
+        {__COMMIT_HASH__ && (
           <>
             <span> | </span>
             <span>
-              poi R2 index version {import.meta.env.COMMIT_HASH.slice(0, 8)}/
-              {import.meta.env.BUILD_DATE}
+              poi R2 index version {__COMMIT_HASH__.slice(0, 8)}/
+              {__BUILD_DATE__}
             </span>
           </>
         )}
