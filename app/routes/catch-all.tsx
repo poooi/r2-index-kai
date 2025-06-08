@@ -17,22 +17,6 @@ import {
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
 
-// export const generateMetadata = async ({
-//   params: { path = [] },
-// }: {
-//   params: { path?: string[] }
-// }): Promise<Metadata> => {
-//   const host = headers().get('host')
-
-//   const cfContext = await getCloudflareContext()
-
-//   const site = getSite(cfContext.env, host!)
-//   return {
-//     title: `index of /${path.join('/')} | ${site.title}`,
-//     description: site.description,
-//   }
-// }
-
 export const loader = async ({
   request,
   context,
@@ -46,9 +30,11 @@ export const loader = async ({
   const cfContext = await context.cloudflare;
   const site = getSite(cfContext.env, host);
 
-  const { "*": splats = "" } = params;
-
-  console.log(splats)
+  let { "*": splats = "" } = params;
+  if (splats.endsWith("/")) {
+    splats = splats.slice(0, -1);
+  }
+  const prefix = splats ? `${splats}/` : "";
 
   let result: FileListing[] = [];
 
@@ -60,7 +46,7 @@ export const loader = async ({
     result = JSON.parse(cached) as FileListing[];
   } else {
     const listResult = await listBucket(site.bucket, {
-      prefix: splats,
+      prefix,
       delimiter: "/",
       include: ["httpMetadata", "customMetadata"],
     });
@@ -94,16 +80,24 @@ export const loader = async ({
     throw data(null, { status: 404 });
   }
 
-  return { data: result, splats, siteTitle: site.title, siteHost: host };
+  return {
+    data: result,
+    splats,
+    siteTitle: site.title,
+    siteHost: host,
+    siteDescription: site.description,
+  };
 };
 
 export default async function CatchAll({ loaderData }: Route.ComponentProps) {
-  const { data, splats, siteTitle, siteHost } = loaderData;
+  const { data, splats, siteTitle, siteHost, siteDescription } = loaderData;
 
   const path = splats.split("/");
 
   return (
     <main className="relative flex min-h-screen max-w-screen-2xl flex-col p-4">
+      <title>{`index of /${splats} | ${siteTitle}`}</title>
+      <meta name="description" content={siteDescription} />
       <nav className="rounded border-2 bg-card px-4 py-2 text-xl">
         <h2 className="sr-only">Navigation</h2>
         <Breadcrumb>

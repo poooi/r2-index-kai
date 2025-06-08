@@ -22,7 +22,7 @@ import {
 import { Link } from 'react-router'
 import { useMemo, useState, type ReactNode } from 'react'
 
-import { DataType, type Data } from './model'
+import { DataType, type FileListing } from './model'
 import { filterValue } from './states'
 
 import {
@@ -37,10 +37,10 @@ import {
 import { cn } from '@/lib/utils'
 
 interface TableProps {
-  data: Data[]
+  data: FileListing[]
 }
 
-const columnHelper = createColumnHelper<Data>()
+const columnHelper = createColumnHelper<FileListing>()
 
 const cleanFileName = (name: string) => {
   return name.split('/').slice(-1).pop()!
@@ -75,7 +75,7 @@ const getSortedIcon = (direction: false | SortDirection): ReactNode => {
   return <ArrowDown className="inline-block" />
 }
 
-const sortByNumber: SortingFn<Data> = (rowA, rowB, columnId) => {
+const sortByNumber: SortingFn<FileListing> = (rowA, rowB, columnId) => {
   if (rowA.original.type !== rowB.original.type) {
     return rowA.original.type === DataType.Folder ? 1 : -1
   }
@@ -84,7 +84,7 @@ const sortByNumber: SortingFn<Data> = (rowA, rowB, columnId) => {
     : -1
 }
 
-const sortByString: SortingFn<Data> = (rowA, rowB, columnId) => {
+const sortByString: SortingFn<FileListing> = (rowA, rowB, columnId) => {
   if (rowA.original.type !== rowB.original.type) {
     return rowA.original.type === DataType.Folder ? 1 : -1
   }
