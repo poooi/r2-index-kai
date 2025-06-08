@@ -10,6 +10,13 @@ export default async function handleRequest(
   routerContext: EntryContext,
   _loadContext: AppLoadContext
 ) {
+  if (!request.url.endsWith("/")) {
+    const r2Response = await fetch(new Request(request));
+    if (r2Response.status !== 404) {
+      return r2Response;
+    }
+  }
+
   let shellRendered = false;
   const userAgent = request.headers.get("user-agent");
 
