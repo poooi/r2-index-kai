@@ -35,3 +35,6 @@ export async function listBucket(
 
 export const getBucketDataCacheKey = (prefix: string, host: string) =>
   `bucket-data:${host}:${prefix}`;
+
+export const getR2IndexMissKey = (host: string, pathname: string) =>
+  `r2-index-miss:${host}:${pathname}`;

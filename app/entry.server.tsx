@@ -2,6 +2,7 @@ import type { AppLoadContext, EntryContext } from "react-router";
 import { ServerRouter } from "react-router";
 import { isbot } from "isbot";
 import { renderToReadableStream } from "react-dom/server";
+import { getR2IndexMissKey } from "./lib/cf";
 
 export default async function handleRequest(
   request: Request,
@@ -10,10 +11,26 @@ export default async function handleRequest(
   routerContext: EntryContext,
   _loadContext: AppLoadContext
 ) {
-  if (!request.url.endsWith("/")) {
+  const cfContext = _loadContext.cloudflare;
+  const url = new URL(request.url);
+  const r2Missed = await cfContext.env.R2_INDEX_CACHE.get(
+    getR2IndexMissKey(url.host, url.pathname)
+  );
+
+  if (!request.url.endsWith("/") && r2Missed === null) {
     const r2Response = await fetch(new Request(request));
     if (r2Response.status !== 404) {
       return r2Response;
+    } else {
+      cfContext.ctx.waitUntil(
+        cfContext.env.R2_INDEX_CACHE.put(
+          getR2IndexMissKey(url.host, url.pathname),
+          url.toString(),
+          {
+            expirationTtl: 60,
+          }
+        )
+      );
     }
   }
 
