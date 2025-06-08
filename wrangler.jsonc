@@ -4,13 +4,18 @@
   "compatibility_date": "2025-04-04",
   "main": "./workers/app.ts",
   "r2_buckets": [
-    { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db"},
-    { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies"},
+    { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db" },
+    { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies" }
   ],
   "kv_namespaces": [
     {
       "binding": "R2_INDEX_CACHE",
       "id": "4caf510805554a53968fe664289e0b98"
     }
+  ],
+  "routes": [
+    { "pattern": "db.poi.moe/*", "zone_name": "poi.moe" },
+    { "pattern": "nightlies.poi.moe/*", "zone_name": "poi.moe" },
+    { "pattern": "nightly.poi.moe/*", "zone_name": "poi.moe" }
   ]
 }
