@@ -1,9 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "react-router-app",
+  "name": "r2-index-kai",
   "compatibility_date": "2025-04-04",
   "main": "./workers/app.ts",
   "vars": {
     "VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
-  }
+  },
+  "r2_buckets": [
+    { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db"},
+    { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies"},
+  ]
 }
