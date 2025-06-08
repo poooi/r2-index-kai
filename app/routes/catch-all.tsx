@@ -38,7 +38,7 @@ export const loader = async ({
 
   let result: FileListing[] = [];
 
-  const cached = await cfContext.env.NEXT_CACHE_WORKERS_KV.get<string>(
+  const cached = await cfContext.env.R2_INDEX_CACHE.get<string>(
     getBucketDataCacheKey(splats, host)
   );
 
@@ -66,7 +66,7 @@ export const loader = async ({
       })),
     ] satisfies FileListing[];
     cfContext.ctx.waitUntil(
-      cfContext.env.NEXT_CACHE_WORKERS_KV.put(
+      cfContext.env.R2_INDEX_CACHE.put(
         getBucketDataCacheKey(splats, host),
         JSON.stringify(result),
         {

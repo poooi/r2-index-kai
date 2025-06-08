@@ -3,17 +3,14 @@
   "name": "r2-index-kai",
   "compatibility_date": "2025-04-04",
   "main": "./workers/app.ts",
-  "vars": {
-    "VALUE_FROM_CLOUDFLARE": "Hello from Cloudflare"
-  },
   "r2_buckets": [
     { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db"},
     { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies"},
   ],
   "kv_namespaces": [
     {
-      "binding": "NEXT_CACHE_WORKERS_KV",
-      "id": "a73835e296554c0e8a4c83a6f5dc3493"
+      "binding": "R2_INDEX_CACHE",
+      "id": "4caf510805554a53968fe664289e0b98"
     }
   ]
 }
