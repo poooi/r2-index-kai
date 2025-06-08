@@ -3,7 +3,7 @@ export enum DataType {
     Folder = 'folder',
   }
 
-  export interface Data {
+  export interface FileListing {
     key: string
     href: string
     type: DataType
