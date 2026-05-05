@@ -92,6 +92,7 @@ const sortByString: SortingFn<FileListing> = (rowA, rowB, columnId) => {
     .getValue<string>(columnId)
     .localeCompare(rowB.getValue<string>(columnId), 'en', {
       sensitivity: 'base',
+      numeric: true,
     })
 }
 
