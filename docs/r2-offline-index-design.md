@@ -28,6 +28,84 @@ R2 bucket
 
 D1 is the canonical index store. KV must not be used as the canonical index because folder aggregates require transactional updates, indexed prefix queries, and recomputation after deletes.
 
+## Cloudflare entity graph
+
+```mermaid
+flowchart LR
+  subgraph PublicTraffic["Public traffic"]
+    Browser["Browser / CDN client"]
+    RouteDb["Route: db.poi.moe/*"]
+    RouteNightlies["Routes: nightlies.poi.moe/*, nightly.poi.moe/*"]
+  end
+
+  subgraph Ingress["Worker: r2-index-kai"]
+    AppWorker["workers/app.ts"]
+    SiteMap["app/lib/sites.ts\nhost -> bucketName + R2 binding"]
+  end
+
+  subgraph R2["R2 buckets"]
+    PoiDb["poi-db\nbinding: BUCKET_POI_DB"]
+    PoiNightlies["poi-nightlies\nbinding: BUCKET_POI_NIGHTLIES"]
+  end
+
+  subgraph Queues["Cloudflare Queues"]
+    EventQueue["r2-index-kai-events\nR2 notifications"]
+    EventDlq["r2-index-kai-events-dlq"]
+    ScanQueue["r2-index-kai-scan\nfull-scan/recompute jobs"]
+    ScanDlq["r2-index-kai-scan-dlq"]
+  end
+
+  subgraph Indexer["Worker: r2-index-kai-indexer"]
+    QueueHandler["queue() consumer"]
+    CronHandler["scheduled() cron"]
+    R2HeadList["R2 head/list operations"]
+    Recompute["folder recompute logic"]
+  end
+
+  subgraph D1["D1 database: r2-index-kai-index"]
+    IndexBuckets["index_buckets"]
+    Objects["objects"]
+    Folders["folders"]
+    IndexRuns["index_runs"]
+  end
+
+  subgraph KV["KV namespace"]
+    Cache["R2_INDEX_CACHE\nshort-lived listing/miss cache only"]
+  end
+
+  Browser --> RouteDb --> AppWorker
+  Browser --> RouteNightlies --> AppWorker
+  AppWorker --> SiteMap
+  SiteMap --> PoiDb
+  SiteMap --> PoiNightlies
+  AppWorker --> D1
+  AppWorker -. optional TTL cache .-> Cache
+  AppWorker -. direct file serving only .-> PoiDb
+  AppWorker -. direct file serving only .-> PoiNightlies
+
+  PoiDb -- object-create/object-delete --> EventQueue
+  PoiNightlies -- object-create/object-delete --> EventQueue
+  EventQueue --> QueueHandler
+  EventQueue -. failed messages .-> EventDlq
+  CronHandler --> ScanQueue
+  QueueHandler --> ScanQueue
+  ScanQueue --> QueueHandler
+  ScanQueue -. failed messages .-> ScanDlq
+
+  QueueHandler --> R2HeadList
+  R2HeadList --> PoiDb
+  R2HeadList --> PoiNightlies
+  QueueHandler --> Recompute
+  QueueHandler --> D1
+  Recompute --> D1
+
+  IndexBuckets --- Objects
+  IndexBuckets --- Folders
+  IndexBuckets --- IndexRuns
+```
+
+Ingress reads D1 for directory listings. The only normal ingress-to-R2 path is direct object serving. R2 listing belongs to the indexer Worker.
+
 ## Cloudflare resources
 
 Create one shared D1 database:
@@ -247,6 +325,65 @@ CREATE TABLE index_runs (
 
 Root folder is represented by `prefix = ''` and `parent_prefix = NULL`.
 
+## Database modeling recommendation
+
+Use Drizzle for schema modeling, query typing, and migration generation, but keep performance-critical indexing operations as explicit D1 prepared SQL.
+
+Recommended package choice for the implementation PR:
+
+```sh
+npm install drizzle-orm
+npm install --save-dev drizzle-kit
+```
+
+Recommended files:
+
+```text
+app/lib/db/schema.ts
+app/lib/db/client.ts
+drizzle.config.ts
+migrations/
+```
+
+`drizzle.config.ts` should generate SQLite migrations into the same `migrations/` folder used by Wrangler:
+
+```ts
+import { defineConfig } from 'drizzle-kit'
+
+export default defineConfig({
+  dialect: 'sqlite',
+  schema: './app/lib/db/schema.ts',
+  out: './migrations',
+})
+```
+
+Use Drizzle's D1 driver at runtime:
+
+```ts
+import { drizzle } from 'drizzle-orm/d1'
+
+const db = drizzle(env.R2_INDEX_DB)
+```
+
+Recommended split:
+
+| Area | Use Drizzle? | Reason |
+| --- | --- | --- |
+| Table definitions | Yes | Single typed schema for Workers and migrations |
+| Simple ingress listing reads | Yes | Type-safe reads and result mapping |
+| Status/admin queries | Yes | Low complexity and easier maintenance |
+| Full-scan upserts | Mixed | Drizzle schema/types are useful, but D1 `batch()` with prepared SQL gives tighter control |
+| Folder aggregate recompute | Prefer raw prepared SQL | Aggregate range queries and D1 limits need predictable SQL and binding counts |
+| Migrations at runtime | No | Generate SQL ahead of time; apply with Wrangler D1 migrations |
+
+Do not run migration tooling from Workers. Generate migration SQL during development with `drizzle-kit generate`, review the SQL, commit it under `migrations/`, and apply it with:
+
+```sh
+wrangler d1 migrations apply r2-index-kai-index --remote
+```
+
+Drizzle is recommended here because the schema is non-trivial but still SQLite-compatible. It gives type-safe D1 access without forcing the indexer to hide important D1 performance constraints behind ORM abstractions.
+
 ## Prefix rules
 
 Use these helpers consistently:
@@ -394,6 +531,9 @@ Source-of-truth documentation checked for this design:
 - https://developers.cloudflare.com/d1/worker-api/d1-database/
 - https://developers.cloudflare.com/d1/best-practices/use-indexes/
 - https://developers.cloudflare.com/d1/best-practices/read-replication/
+- https://orm.drizzle.team/docs/sqlite/connect-cloudflare-d1
+- https://orm.drizzle.team/docs/drizzle-kit-generate
+- https://orm.drizzle.team/docs/drizzle-kit-migrate
 
 ## Indexer job types
 
