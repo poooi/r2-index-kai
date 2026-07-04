@@ -339,8 +339,8 @@ npm install --save-dev drizzle-kit
 Recommended files:
 
 ```text
-app/lib/db/schema.ts
-app/lib/db/client.ts
+shared/db/schema.ts
+app/lib/index-db.ts
 drizzle.config.ts
 migrations/
 ```
@@ -352,7 +352,7 @@ import { defineConfig } from 'drizzle-kit'
 
 export default defineConfig({
   dialect: 'sqlite',
-  schema: './app/lib/db/schema.ts',
+  schema: './shared/db/schema.ts',
   out: './migrations',
 })
 ```
@@ -383,6 +383,213 @@ wrangler d1 migrations apply r2-index-kai-index --remote
 ```
 
 Drizzle is recommended here because the schema is non-trivial but still SQLite-compatible. It gives type-safe D1 access without forcing the indexer to hide important D1 performance constraints behind ORM abstractions.
+
+## Implementation-ready contracts
+
+The implementation should add these package scripts:
+
+```jsonc
+{
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply r2-index-kai-index --local",
+    "db:migrate:remote": "wrangler d1 migrations apply r2-index-kai-index --remote",
+    "deploy:ingress": "npm run build && wrangler deploy",
+    "deploy:indexer": "wrangler deploy --config wrangler.indexer.jsonc",
+    "deploy:all": "npm run deploy:ingress && npm run deploy:indexer"
+  }
+}
+```
+
+Add dependencies in the implementation PR:
+
+```text
+dependencies:
+  drizzle-orm
+
+devDependencies:
+  drizzle-kit
+```
+
+Use the latest available package versions when adding them.
+
+Define explicit runtime env types instead of relying on one global `Env` shape for both Workers:
+
+```ts
+export interface IngressEnv {
+  R2_INDEX_CACHE: KVNamespace
+  R2_INDEX_DB: D1Database
+  BUCKET_POI_DB: R2Bucket
+  BUCKET_POI_NIGHTLIES: R2Bucket
+  INDEX_LIVE_FALLBACK?: string
+}
+
+export interface IndexerEnv {
+  R2_INDEX_DB: D1Database
+  R2_INDEX_SCAN_QUEUE: Queue<ScanJob>
+  BUCKET_POI_DB: R2Bucket
+  BUCKET_POI_NIGHTLIES: R2Bucket
+}
+```
+
+Use these module contracts:
+
+```ts
+// shared/buckets.ts
+export type BucketName = 'poi-db' | 'poi-nightlies'
+export const bucketNames = ['poi-db', 'poi-nightlies'] as const
+
+// shared/prefix.ts
+export function getParentPrefix(key: string): string
+export function getName(key: string): string
+export function getAncestorPrefixes(key: string): string[]
+export function getPrefixUpperBound(prefix: string): string | null
+
+// app/lib/index-db.ts
+export interface DirectoryEntry {
+  key: string
+  href: string
+  type: 'file' | 'folder'
+  size: number
+  created?: number
+  modified?: number
+}
+export async function listIndexedDirectory(
+  db: D1Database,
+  bucket: BucketName,
+  prefix: string,
+): Promise<DirectoryEntry[]>
+
+// workers/indexer/jobs.ts
+export function enqueueFullScan(
+  queue: Queue<ScanJob>,
+  bucket: BucketName,
+  generation: number,
+  cursor?: string,
+): Promise<void>
+export function enqueueRecomputeFolders(
+  queue: Queue<ScanJob>,
+  bucket: BucketName,
+  prefixes: string[],
+): Promise<void>
+
+// workers/indexer/r2-events.ts
+export function normalizeR2Event(body: unknown): R2EventNotification
+export async function handleR2Event(env: IndexerEnv, event: R2EventNotification): Promise<void>
+
+// workers/indexer/full-scan.ts
+export async function startFullScan(env: IndexerEnv, bucket: BucketName): Promise<void>
+export async function handleFullScanPage(env: IndexerEnv, job: Extract<ScanJob, { kind: 'full-scan-page' }>): Promise<void>
+export async function finishFullScan(env: IndexerEnv, job: Extract<ScanJob, { kind: 'finish-full-scan' }>): Promise<void>
+
+// workers/indexer/folders.ts
+export async function recomputeFolders(env: IndexerEnv, bucket: BucketName, prefixes: string[]): Promise<void>
+```
+
+Queue entrypoint behavior:
+
+```ts
+export default {
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      try {
+        if (batch.queue === 'r2-index-kai-events') {
+          await handleR2Event(env, normalizeR2Event(message.body))
+        } else {
+          await handleScanJob(env, message.body)
+        }
+        message.ack()
+      } catch (error) {
+        console.error('indexer job failed', {
+          queue: batch.queue,
+          messageId: message.id,
+          attempts: message.attempts,
+          error,
+        })
+        message.retry({ delaySeconds: Math.min(300, 2 ** message.attempts) })
+      }
+    }
+  },
+}
+```
+
+Do not use `Promise.all(batch.messages.map(...))` for event batches. Per-message acknowledgement keeps successful events from retrying when another message in the same batch fails.
+
+Raw D1 statement inventory for indexer hot paths:
+
+```sql
+-- get active bucket state
+SELECT bucket, status, generation, last_scan_started_at
+FROM index_buckets
+WHERE bucket = ?;
+
+-- upsert bucket scan state
+INSERT INTO index_buckets (
+  bucket, status, generation, last_scan_started_at, updated_at
+) VALUES (?, 'scanning', ?, ?, ?)
+ON CONFLICT(bucket) DO UPDATE SET
+  status = 'scanning',
+  generation = excluded.generation,
+  last_scan_started_at = excluded.last_scan_started_at,
+  updated_at = excluded.updated_at;
+
+-- upsert object
+INSERT INTO objects (
+  bucket, key, parent_prefix, name, size, uploaded_at, etag, seen_generation, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(bucket, key) DO UPDATE SET
+  parent_prefix = excluded.parent_prefix,
+  name = excluded.name,
+  size = excluded.size,
+  uploaded_at = excluded.uploaded_at,
+  etag = excluded.etag,
+  seen_generation = excluded.seen_generation,
+  updated_at = excluded.updated_at;
+
+-- ensure folder
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, updated_at
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(bucket, prefix) DO NOTHING;
+
+-- mark folder dirty
+UPDATE folders
+SET needs_recompute = 1, updated_at = ?
+WHERE bucket = ? AND prefix = ?;
+
+-- delete object
+DELETE FROM objects
+WHERE bucket = ? AND key = ?;
+```
+
+Use `env.R2_INDEX_DB.batch()` for groups of prepared statements where all statements must succeed together. Cloudflare's 100-bound-parameter limit applies to each SQL statement, not the whole batch, but batches should still stay small for latency and query-count control. With the current object upsert shape, process at most 10 objects per D1 batch and loop inside the 50-object R2 scan page.
+
+Local development and test fixtures:
+
+```text
+fixtures/r2-index/
+  initial-objects.json
+  r2-create-event.json
+  r2-delete-event.json
+```
+
+The implementation PR should include unit tests for prefix helpers and pure job normalization. If no test runner exists yet, add Vitest for these pure TypeScript tests. End-to-end R2 event delivery can be tested manually with synthetic Queue messages because local R2 event notifications are not the source of truth for production behavior.
+
+Implementation acceptance criteria:
+
+```text
+1. `npm run build` succeeds.
+2. `npm run typecheck` succeeds or only shows an explicitly documented pre-existing React Router typegen issue.
+3. `drizzle-kit generate` creates the D1 migration from `shared/db/schema.ts`.
+4. `wrangler d1 migrations apply r2-index-kai-index --local` succeeds.
+5. Prefix helper tests cover root, single-level, nested, Unicode, and no-slash keys.
+6. R2 event normalization tests cover PutObject, CopyObject, CompleteMultipartUpload, DeleteObject, and LifecycleDeletion.
+7. Synthetic create event upserts an object row and dirties all ancestor folders.
+8. Synthetic delete event deletes the object row and dirties old ancestor folders.
+9. A full-scan page with a deleted object skips it after `head()` returns null.
+10. Ingress directory loader reads from D1 and does not call `bucket.list()` when `INDEX_LIVE_FALLBACK` is false.
+11. The PR effective diff has no direct request-time folder-size scan implementation.
+```
 
 ## Prefix rules
 
