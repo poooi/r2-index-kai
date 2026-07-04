@@ -15,7 +15,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { getSite } from "@/lib/sites";
-import { getBucketDataCacheKey, listDirectoryWithFolderStats } from "@/lib/cf";
+import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
 
 export const loader = async ({
   request,
@@ -45,25 +45,23 @@ export const loader = async ({
   if (cached !== null) {
     result = JSON.parse(cached) as FileListing[];
   } else {
-    const listResult = await listDirectoryWithFolderStats(site.bucket, {
+    const listResult = await listBucket(site.bucket, {
       prefix,
+      delimiter: "/",
+      include: ["httpMetadata", "customMetadata"],
     });
 
     result = [
-      ...Array.from(listResult.folders, ([folderKey, stats]) => ({
-        key: folderKey,
-        href: `/${folderKey}`,
+      ...listResult.delimitedPrefixes.map((delimitedPrefix) => ({
+        key: delimitedPrefix,
+        href: `/${delimitedPrefix}`,
         type: DataType.Folder,
-        size: stats.size,
-        created: stats.created,
-        modified: stats.modified,
       })),
       ...listResult.objects.map((object) => ({
         key: object.key,
         href: `/${object.key}`,
         type: DataType.File,
         size: object.size,
-        created: object.uploaded.getTime(),
         modified: object.uploaded.getTime(),
       })),
     ] satisfies FileListing[];

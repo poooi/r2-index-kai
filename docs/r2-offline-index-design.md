@@ -125,14 +125,16 @@ Add `wrangler.indexer.jsonc`:
         "max_batch_size": 25,
         "max_batch_timeout": 10,
         "max_retries": 5,
-        "dead_letter_queue": "r2-index-kai-events-dlq"
+        "dead_letter_queue": "r2-index-kai-events-dlq",
+        "max_concurrency": 4
       },
       {
         "queue": "r2-index-kai-scan",
         "max_batch_size": 1,
         "max_batch_timeout": 5,
         "max_retries": 5,
-        "dead_letter_queue": "r2-index-kai-scan-dlq"
+        "dead_letter_queue": "r2-index-kai-scan-dlq",
+        "max_concurrency": 1
       }
     ]
   },
@@ -146,6 +148,8 @@ Add `wrangler.indexer.jsonc`:
 ```
 
 R2 writes directly to `r2-index-kai-events`, so the indexer does not need a producer binding for that queue. The indexer does need `R2_INDEX_SCAN_QUEUE` so cron and event handlers can enqueue bounded scan/recompute jobs.
+
+Queue concurrency is intentionally capped because the shared D1 database is single-threaded. Events may run with limited parallelism because each event re-checks current R2 state with `bucket.head()`. Scan and recompute jobs run with `max_concurrency: 1` so full-scan finalization, stale cleanup, and large folder recomputes cannot overlap each other.
 
 ## Site mapping
 
@@ -206,9 +210,6 @@ CREATE INDEX objects_by_parent
 
 CREATE INDEX objects_by_generation
   ON objects(bucket, seen_generation);
-
-CREATE INDEX objects_by_key
-  ON objects(bucket, key);
 
 CREATE TABLE folders (
   bucket TEXT NOT NULL,
@@ -377,6 +378,7 @@ This design depends on these Cloudflare-documented constraints:
 | Queues | Max consumer batch size is 100; consumer wall time is 15 minutes; default CPU is lower unless configured. | Use separate queues, `max_batch_size: 1` for scan jobs, and `limits.cpu_ms: 300000` on the indexer. |
 | D1 | One database is single-threaded, max size is 10 GB on Workers Paid, max query duration is 30 seconds, max bound parameters per query is 100, and query count per Worker invocation is limited. | Keep D1 writes bounded, remove the `object_ancestors` table, chunk recomputes, and use KV/read replication for hot listing reads if needed. |
 | D1 read replication | Read replicas are only used through the Sessions API. | Ingress listing reads should use `R2_INDEX_DB.withSession('first-unconstrained')` after the index is ready. |
+| Queue acknowledgement | Messages are acknowledged when the `queue()` handler resolves; individual messages can also call `ack()` or `retry()`. | Process event messages independently and explicitly `ack()` only after D1 writes plus scan-job enqueue succeed. |
 
 If either bucket's estimated index approaches 5 GB or D1 overload errors appear during scans, split into one D1 database per bucket before adding more features.
 
@@ -385,9 +387,12 @@ Source-of-truth documentation checked for this design:
 - https://developers.cloudflare.com/r2/buckets/event-notifications/
 - https://developers.cloudflare.com/r2/api/workers/workers-api-reference/
 - https://developers.cloudflare.com/queues/configuration/configure-queues/
+- https://developers.cloudflare.com/queues/configuration/consumer-concurrency/
+- https://developers.cloudflare.com/queues/configuration/javascript-apis/
 - https://developers.cloudflare.com/queues/platform/limits/
 - https://developers.cloudflare.com/d1/platform/limits/
 - https://developers.cloudflare.com/d1/worker-api/d1-database/
+- https://developers.cloudflare.com/d1/best-practices/use-indexes/
 - https://developers.cloudflare.com/d1/best-practices/read-replication/
 
 ## Indexer job types
@@ -454,6 +459,8 @@ For each configured bucket:
 1. Resolve bucket name to R2 binding.
 2. List R2 with limit 50, no delimiter, and the job cursor.
 3. For each object:
+   - run `bucket.head(object.key)` and skip the object if it no longer exists
+   - use the `head()` result, not the possibly stale list item, for size/uploaded/etag
    - compute parent_prefix, name, ancestors
    - upsert objects row
    - set seen_generation = job.generation
@@ -466,10 +473,12 @@ For each configured bucket:
 
 R2 allows up to 1000 listed objects per call, but this design intentionally uses 50. The lower page size keeps D1 writes below per-invocation query limits after folder rows and dirty flags are included.
 
+The per-object `head()` call is intentional. It prevents a full-scan page from resurrecting an object that was listed just before a concurrent delete or overwrite event was processed.
+
 `finish-full-scan` handler:
 
 ```text
-1. Find stale objects where seen_generation < generation.
+1. Find stale objects where `seen_generation < generation` and `updated_at < last_scan_started_at`.
 2. For each stale object:
    - mark old ancestors needs_recompute = 1
    - delete object row
@@ -499,11 +508,12 @@ The full scan never loads the whole bucket into memory.
 4. If head returns null, process as delete.
 5. Read old objects row.
 6. Upsert the objects row with current size/uploaded/etag.
-7. Ensure folder rows exist for all old and new ancestors.
-8. Mark all old and new ancestors needs_recompute = 1.
-9. Enqueue recompute-folders for those ancestors.
-10. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
-11. Update index_buckets.last_event_at.
+7. If `index_buckets.status = 'scanning'`, set `seen_generation` to the active bucket generation so a concurrent full scan cannot delete this fresh object as stale.
+8. Ensure folder rows exist for all old and new ancestors.
+9. Mark all old and new ancestors needs_recompute = 1.
+10. Enqueue recompute-folders for those ancestors.
+11. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
+12. Update index_buckets.last_event_at.
 ```
 
 Always recompute affected ancestors after event updates. This is slightly more expensive than arithmetic deltas but avoids timestamp edge cases and out-of-order overwrite bugs.
@@ -525,6 +535,8 @@ Always recompute affected ancestors after event updates. This is slightly more e
 ```
 
 Duplicate events are safe because all operations are idempotent.
+
+The event consumer should not process a whole batch with `Promise.all` and then rely on all-or-nothing batch acknowledgement. Process each message independently with bounded concurrency, call `message.ack()` after that message's D1 writes and scan-queue enqueue succeed, and call `message.retry({ delaySeconds })` for recoverable D1/R2/Queue failures.
 
 ## Folder recomputation
 

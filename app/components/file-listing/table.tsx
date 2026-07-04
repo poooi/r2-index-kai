@@ -79,41 +79,21 @@ const sortByNumber: SortingFn<FileListing> = (rowA, rowB, columnId) => {
   if (rowA.original.type !== rowB.original.type) {
     return rowA.original.type === DataType.Folder ? 1 : -1
   }
-  const valueA = rowA.getValue<number | undefined>(columnId)
-  const valueB = rowB.getValue<number | undefined>(columnId)
-
-  if (valueA === undefined && valueB === undefined) {
-    return 0
-  }
-  if (valueA === undefined) {
-    return 1
-  }
-  if (valueB === undefined) {
-    return -1
-  }
-
-  return valueA < valueB ? 1 : -1
+  return rowA.getValue<number>(columnId) < rowB.getValue<number>(columnId)
+    ? 1
+    : -1
 }
 
 const sortByString: SortingFn<FileListing> = (rowA, rowB, columnId) => {
   if (rowA.original.type !== rowB.original.type) {
     return rowA.original.type === DataType.Folder ? 1 : -1
   }
-
   return rowA
     .getValue<string>(columnId)
     .localeCompare(rowB.getValue<string>(columnId), 'en', {
       sensitivity: 'base',
       numeric: true,
     })
-}
-
-const renderTimestamp = (timestamp?: number) => {
-  if (timestamp === undefined) {
-    return '-'
-  }
-  const date = new Date(timestamp)
-  return <time dateTime={date.toISOString()}>{date.toISOString()}</time>
 }
 
 export const IndexTable = ({ data }: TableProps) => {
@@ -155,24 +135,26 @@ export const IndexTable = ({ data }: TableProps) => {
       }),
       columnHelper.accessor('size', {
         sortingFn: sortByNumber,
-        cell: (info) => {
-          const size = info.getValue()
-          return size !== undefined ? (
-            <span title={size.toString()}>{filesize(size)}</span>
+        cell: (info) =>
+          info.getValue() ? (
+            <span title={info.getValue()?.toString()}>
+              {filesize(info.getValue()!)}
+            </span>
           ) : (
             '-'
-          )
-        },
+          ),
         header: 'Size(SI)',
-      }),
-      columnHelper.accessor('created', {
-        sortingFn: sortByNumber,
-        cell: (info) => renderTimestamp(info.getValue()),
-        header: 'Created',
       }),
       columnHelper.accessor('modified', {
         sortingFn: sortByNumber,
-        cell: (info) => renderTimestamp(info.getValue()),
+        cell: (info) => {
+          const timestamp = info.getValue()
+          if (!timestamp) {
+            return '-'
+          }
+          const date = new Date(timestamp)
+          return <time dateTime={date.toISOString()}>{date.toISOString()}</time>
+        },
         header: 'Modified',
       }),
     ],
