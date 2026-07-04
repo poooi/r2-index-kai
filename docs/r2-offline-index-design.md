@@ -328,6 +328,9 @@ CREATE TABLE index_runs (
 
 CREATE INDEX index_runs_by_bucket_status
   ON index_runs(bucket, status, lease_expires_at);
+
+CREATE INDEX index_runs_by_bucket_generation_kind
+  ON index_runs(bucket, generation, kind);
 ```
 
 Root folder is represented by `prefix = ''` and `parent_prefix = NULL`.
@@ -611,7 +614,7 @@ FROM objects
 WHERE bucket = ?
   AND seen_generation < ?
   AND updated_at < ?
-  AND key > ?
+  AND key > COALESCE(?, '')
 ORDER BY key
 LIMIT 100;
 
