@@ -727,24 +727,74 @@ After a recompute sets `total_file_count = 0`, delete that folder row unless `pr
 
 ## Worker code layout
 
-Recommended files:
+Do not convert this repository into a monorepo for the first implementation. Keep one npm package with multiple Worker entrypoints and multiple Wrangler configs.
+
+Reasons:
+
+- The ingress Worker and indexer Worker share the same Cloudflare account resources, D1 schema, bucket names, and TypeScript types.
+- The dependency set is small; separate packages would add workspace/build complexity without isolating much.
+- The current repository already has a single React Router app plus `workers/app.ts`; adding `workers/indexer.ts` fits the existing shape.
+- Deployment separation is already handled by separate Wrangler configs, so package separation is not required.
+
+Use this layout:
 
 ```text
-app/lib/sites.ts
-app/lib/index-db.ts
-app/routes/catch-all.tsx
-workers/app.ts
-workers/indexer.ts
-workers/indexer/jobs.ts
-workers/indexer/r2-events.ts
-workers/indexer/folders.ts
-workers/indexer/full-scan.ts
-workers/indexer/buckets.ts
+app/
+  lib/
+    index-db.ts              # ingress-side read queries only
+    sites.ts                 # host -> bucketName + R2 binding
+  routes/
+    catch-all.tsx
+
+shared/
+  buckets.ts                 # bucket-name constants and binding resolver types
+  prefix.ts                  # getParentPrefix/getName/getAncestorPrefixes helpers
+  db/
+    schema.ts                # Drizzle table definitions
+    types.ts                 # shared row/result types
+
+workers/
+  app.ts                     # existing React Router ingress Worker entry
+  indexer.ts                 # indexer Worker entrypoint: queue() + scheduled()
+  indexer/
+    jobs.ts                  # ScanJob and dispatch helpers
+    r2-events.ts             # R2 notification normalization and event handling
+    folders.ts               # folder recompute logic
+    full-scan.ts             # paginated R2 scan jobs
+    buckets.ts               # R2 binding resolver for indexer
+
+wrangler.jsonc               # ingress Worker config
+wrangler.indexer.jsonc       # indexer Worker config
+drizzle.config.ts
+migrations/
 ```
 
-`app/lib/index-db.ts` should contain ingress-side read queries only.
+`shared/` is pure TypeScript. It must not import React, React Router, Worker entry modules, or request-specific code. Both `app/` and `workers/` may import from `shared/`.
 
-`workers/indexer/*` should contain all write/recompute logic.
+Update TypeScript/Vite path aliases when adding `shared/`:
+
+```jsonc
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./app/*"],
+      "~/*": ["./shared/*"]
+    }
+  }
+}
+```
+
+Also add `shared/**/*` to `tsconfig.cloudflare.json` includes. For Vite, keep `@` for app imports and add a `~` alias to `./shared`.
+
+Rules:
+
+- `app/lib/index-db.ts` contains ingress-side D1 reads only.
+- `workers/indexer/*` contains all D1 writes, full scans, Queue handling, and folder recompute logic.
+- `shared/db/schema.ts` is the only schema definition source used by Drizzle and runtime code.
+- Do not import from `app/` inside `workers/indexer/*`; use `shared/` instead.
+- Do not import from `workers/` inside React components; route loaders should use `app/lib/*` and `shared/*`.
+
+Reconsider a monorepo only if the project later has independent deploy pipelines, incompatible dependency sets, or reusable packages published outside this repository.
 
 ## Ingress fallback policy
 
