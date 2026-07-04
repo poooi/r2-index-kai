@@ -261,6 +261,8 @@ The ingress Worker uses `bucketName` for D1 queries and `bucket` only for direct
 
 Add `migrations/0001_index.sql`:
 
+All timestamp columns (`*_at`, `uploaded_at`, `created_at`, `modified_at`, `generation`, `lease_expires_at`) use Unix epoch milliseconds. Use `Date.now()` for generated timestamps and `R2Object.uploaded.getTime()` for R2 object upload timestamps. Do not mix seconds and milliseconds.
+
 ```sql
 CREATE TABLE index_buckets (
   bucket TEXT PRIMARY KEY,
@@ -311,9 +313,6 @@ CREATE INDEX folders_by_parent
 CREATE INDEX folders_needing_recompute
   ON folders(bucket, needs_recompute);
 
-CREATE INDEX index_runs_by_bucket_status
-  ON index_runs(bucket, status, lease_expires_at);
-
 CREATE TABLE index_runs (
   id TEXT PRIMARY KEY,
   bucket TEXT NOT NULL,
@@ -326,6 +325,9 @@ CREATE TABLE index_runs (
   updated_at INTEGER NOT NULL,
   finished_at INTEGER
 );
+
+CREATE INDEX index_runs_by_bucket_status
+  ON index_runs(bucket, status, lease_expires_at);
 ```
 
 Root folder is represented by `prefix = ''` and `parent_prefix = NULL`.
@@ -612,6 +614,23 @@ WHERE bucket = ?
   AND key > ?
 ORDER BY key
 LIMIT 100;
+
+-- finalize bucket scan state
+UPDATE index_buckets
+SET
+  status = 'ready',
+  last_scan_finished_at = ?,
+  updated_at = ?
+WHERE bucket = ? AND generation = ?;
+
+-- finalize scan run
+UPDATE index_runs
+SET
+  status = 'finished',
+  finished_at = ?,
+  updated_at = ?,
+  lease_expires_at = NULL
+WHERE bucket = ? AND generation = ? AND kind = 'full-scan';
 ```
 
 Use `env.R2_INDEX_DB.batch()` for groups of prepared statements where all statements must succeed together. Cloudflare's 100-bound-parameter limit applies to each SQL statement, not the whole batch, but batches should still stay small for latency and query-count control. With the current object upsert shape, process at most 10 objects per D1 batch and loop inside the 50-object R2 scan page.
@@ -1134,8 +1153,9 @@ The per-object `head()` call is intentional. It prevents a full-scan page from r
 ```text
 1. If any folders still have needs_recompute = 1, enqueue another finalize-full-scan with delay and return.
 2. Delete empty folder rows except the root folder.
-3. Mark index_buckets status = 'ready'.
-4. Clear the scan lease.
+3. Mark index_buckets status = 'ready' and set last_scan_finished_at = Date.now().
+4. Mark the index_runs row status = 'finished' and set finished_at = Date.now().
+5. Clear the scan lease.
 ```
 
 The full scan never loads the whole bucket into memory.
