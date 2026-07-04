@@ -181,7 +181,7 @@ Add `wrangler.indexer.jsonc`:
   "name": "r2-index-kai-indexer",
   "compatibility_date": "2025-04-04",
   "main": "./workers/indexer.ts",
-  "workers_dev": true,
+  "workers_dev": false,
   "r2_buckets": [
     { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db" },
     { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies" }
@@ -228,6 +228,8 @@ Add `wrangler.indexer.jsonc`:
 R2 writes directly to `r2-index-kai-events`, so the indexer does not need a producer binding for that queue. The indexer does need `R2_INDEX_SCAN_QUEUE` so cron and event handlers can enqueue bounded scan/recompute jobs.
 
 Queue concurrency is intentionally capped because the shared D1 database is single-threaded. Events may run with limited parallelism because each event re-checks current R2 state with `bucket.head()`. Scan and recompute jobs run with `max_concurrency: 1` so full-scan finalization, stale cleanup, and large folder recomputes cannot overlap each other.
+
+This design assumes Workers Paid for production-sized buckets. Workers Free limits are useful for development, but the indexer can exceed Free-tier subrequest/query limits when scanning R2 and writing D1. Keep scan pages bounded anyway so one invocation remains small and retryable.
 
 ## Site mapping
 
@@ -287,7 +289,7 @@ CREATE INDEX objects_by_parent
   ON objects(bucket, parent_prefix, name);
 
 CREATE INDEX objects_by_generation
-  ON objects(bucket, seen_generation);
+  ON objects(bucket, seen_generation, updated_at, key);
 
 CREATE TABLE folders (
   bucket TEXT NOT NULL,
@@ -308,6 +310,9 @@ CREATE INDEX folders_by_parent
 
 CREATE INDEX folders_needing_recompute
   ON folders(bucket, needs_recompute);
+
+CREATE INDEX index_runs_by_bucket_status
+  ON index_runs(bucket, status, lease_expires_at);
 
 CREATE TABLE index_runs (
   id TEXT PRIMARY KEY,
@@ -357,7 +362,7 @@ export default defineConfig({
 })
 ```
 
-Use Drizzle's D1 driver at runtime:
+Use Drizzle's D1 driver for schema-backed runtime helpers that do not need D1 Sessions:
 
 ```ts
 import { drizzle } from 'drizzle-orm/d1'
@@ -365,12 +370,14 @@ import { drizzle } from 'drizzle-orm/d1'
 const db = drizzle(env.R2_INDEX_DB)
 ```
 
+For public directory listings, prefer raw prepared SQL over Drizzle so the code can use `env.R2_INDEX_DB.withSession('first-unconstrained')` for D1 read replication. Treat Drizzle as the schema/type/migration source and use raw SQL where D1-specific session or batching behavior matters.
+
 Recommended split:
 
 | Area | Use Drizzle? | Reason |
 | --- | --- | --- |
 | Table definitions | Yes | Single typed schema for Workers and migrations |
-| Simple ingress listing reads | Yes | Type-safe reads and result mapping |
+| Simple ingress listing reads | Prefer raw prepared SQL | D1 read replication requires `withSession()`, which should stay explicit |
 | Status/admin queries | Yes | Low complexity and easier maintenance |
 | Full-scan upserts | Mixed | Drizzle schema/types are useful, but D1 `batch()` with prepared SQL gives tighter control |
 | Folder aggregate recompute | Prefer raw prepared SQL | Aggregate range queries and D1 limits need predictable SQL and binding counts |
@@ -454,8 +461,9 @@ export interface DirectoryEntry {
   created?: number
   modified?: number
 }
+export type D1Queryable = Pick<D1Database, 'prepare' | 'batch'> | D1DatabaseSession
 export async function listIndexedDirectory(
-  db: D1Database,
+  db: D1Queryable,
   bucket: BucketName,
   prefix: string,
 ): Promise<DirectoryEntry[]>
@@ -483,6 +491,17 @@ export async function handleFullScanPage(env: IndexerEnv, job: Extract<ScanJob, 
 export async function finishFullScan(env: IndexerEnv, job: Extract<ScanJob, { kind: 'finish-full-scan' }>): Promise<void>
 
 // workers/indexer/folders.ts
+export async function applyCreateOrOverwriteFolderDeltas(
+  env: IndexerEnv,
+  bucket: BucketName,
+  oldObject: IndexedObject | null,
+  newObject: IndexedObject,
+): Promise<string[]>
+export async function applyDeleteFolderDeltas(
+  env: IndexerEnv,
+  bucket: BucketName,
+  oldObject: IndexedObject,
+): Promise<string[]>
 export async function recomputeFolders(env: IndexerEnv, bucket: BucketName, prefixes: string[]): Promise<void>
 ```
 
@@ -557,12 +576,47 @@ UPDATE folders
 SET needs_recompute = 1, updated_at = ?
 WHERE bucket = ? AND prefix = ?;
 
+-- read ancestor folder stats for boundary detection
+SELECT prefix, created_at, modified_at
+FROM folders
+WHERE bucket = ? AND prefix IN (?, ...);
+
+-- apply folder delta
+UPDATE folders
+SET
+  size = size + ?,
+  total_file_count = total_file_count + ?,
+  created_at = CASE
+    WHEN created_at IS NULL THEN ?
+    WHEN ? IS NULL THEN created_at
+    ELSE MIN(created_at, ?)
+  END,
+  modified_at = CASE
+    WHEN modified_at IS NULL THEN ?
+    WHEN ? IS NULL THEN modified_at
+    ELSE MAX(modified_at, ?)
+  END,
+  updated_at = ?
+WHERE bucket = ? AND prefix = ?;
+
 -- delete object
 DELETE FROM objects
 WHERE bucket = ? AND key = ?;
+
+-- stale cleanup page
+SELECT key, size, uploaded_at
+FROM objects
+WHERE bucket = ?
+  AND seen_generation < ?
+  AND updated_at < ?
+  AND key > ?
+ORDER BY key
+LIMIT 100;
 ```
 
 Use `env.R2_INDEX_DB.batch()` for groups of prepared statements where all statements must succeed together. Cloudflare's 100-bound-parameter limit applies to each SQL statement, not the whole batch, but batches should still stay small for latency and query-count control. With the current object upsert shape, process at most 10 objects per D1 batch and loop inside the 50-object R2 scan page.
+
+When a query uses `prefix IN (?, ...)`, chunk ancestor prefixes to at most 80 values per statement. This leaves room for bucket/time parameters and avoids Cloudflare's 100-bound-parameter limit even for deeply nested object keys.
 
 Local development and test fixtures:
 
@@ -584,7 +638,9 @@ Add these package scripts:
   "scripts": {
     "test": "vitest run",
     "test:unit": "vitest run shared workers/indexer app/lib",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:worker:indexer": "vitest run --config vitest.worker.indexer.config.ts",
+    "test:worker:ingress": "vitest run --config vitest.worker.ingress.config.ts",
+    "test:worker": "npm run test:worker:indexer && npm run test:worker:ingress",
     "test:integration": "vitest run tests/integration && npm run test:worker",
     "test:e2e:preview": "tsx scripts/validate-r2-index-preview.ts"
   }
@@ -601,7 +657,7 @@ devDependencies:
   @cloudflare/vitest-pool-workers
 ```
 
-Add `vitest.worker.config.ts`:
+Add `vitest.worker.indexer.config.ts`:
 
 ```ts
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
@@ -626,6 +682,8 @@ export default defineConfig({
   },
 })
 ```
+
+Add `vitest.worker.ingress.config.ts` with the same migration setup but `wrangler.configPath: './wrangler.jsonc'`.
 
 `tests/worker/apply-migrations.ts` should apply D1 migrations before each Worker integration test and reset bindings after each test:
 
@@ -755,7 +813,7 @@ tests/worker/indexer-retry.test.ts
 
 tests/worker/ingress-fetch.test.ts
   - seed D1 with a directory listing
-  - call ingress fetch/loader through the Worker runtime where practical
+  - call ingress fetch/loader through the ingress Worker runtime
   - assert rendered response uses indexed rows
   - assert direct R2 listing is not required
 ```
@@ -1000,6 +1058,12 @@ type ScanJob =
       generation: number
     }
   | {
+      kind: 'cleanup-stale-page'
+      bucket: 'poi-db' | 'poi-nightlies'
+      generation: number
+      afterKey?: string
+    }
+  | {
       kind: 'recompute-folders'
       bucket: 'poi-db' | 'poi-nightlies'
       prefixes: string[]
@@ -1050,12 +1114,19 @@ The per-object `head()` call is intentional. It prevents a full-scan page from r
 `finish-full-scan` handler:
 
 ```text
-1. Find stale objects where `seen_generation < generation` and `updated_at < last_scan_started_at`.
+1. Enqueue cleanup-stale-page with no afterKey.
+```
+
+`cleanup-stale-page` handler:
+
+```text
+1. Find at most 100 stale objects where `seen_generation < generation`, `updated_at < last_scan_started_at`, and `key > afterKey` when afterKey exists.
 2. For each stale object:
    - mark old ancestors needs_recompute = 1
    - delete object row
-3. Enqueue recompute-folders jobs in chunks of at most 25 prefixes.
-4. Enqueue finalize-full-scan.
+3. If 100 rows were found, enqueue another cleanup-stale-page with afterKey set to the last processed key.
+4. If no more stale rows exist, query dirty folder prefixes in pages of 250 and enqueue recompute-folders jobs in chunks of at most 25 prefixes.
+5. Enqueue finalize-full-scan.
 ```
 
 `finalize-full-scan` handler:
@@ -1082,13 +1153,17 @@ The full scan never loads the whole bucket into memory.
 6. Upsert the objects row with current size/uploaded/etag.
 7. If `index_buckets.status = 'scanning'`, set `seen_generation` to the active bucket generation so a concurrent full scan cannot delete this fresh object as stale.
 8. Ensure folder rows exist for all old and new ancestors.
-9. Mark all old and new ancestors needs_recompute = 1.
-10. Enqueue recompute-folders for those ancestors.
+9. Apply folder deltas to old and new ancestors:
+   - new object: `size += new.size`, `total_file_count += 1`, `created_at = min(created_at, new.uploaded_at)`, `modified_at = max(modified_at, new.uploaded_at)`
+   - overwrite: `size += new.size - old.size`, `total_file_count += 0`
+10. If an overwrite changes a timestamp that currently equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
 11. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
 12. Update index_buckets.last_event_at.
 ```
 
-Always recompute affected ancestors after event updates. This is slightly more expensive than arithmetic deltas but avoids timestamp edge cases and out-of-order overwrite bugs.
+Do not recompute every ancestor on every create event. The root folder may contain the whole bucket, so request-time-like full subtree recomputes must not happen in normal event handling. Use arithmetic deltas for size/count and reserve range-query recomputes for timestamp-boundary cases.
+
+Boundary recomputes are queued scan jobs, never inline event work. If the root prefix `''` is boundary-affected and the bucket is large enough to risk D1 query-duration limits, mark root dirty and let the next scheduled full scan repair root `created_at`/`modified_at` instead of attempting a huge immediate root range query.
 
 ### Delete
 
@@ -1099,9 +1174,9 @@ Always recompute affected ancestors after event updates. This is slightly more e
 4. If object still exists, ignore the delete event as stale/out-of-order.
 5. Read old objects row.
 6. If missing, no-op.
-7. Mark old ancestors needs_recompute = 1.
-8. Delete object row.
-9. Enqueue recompute-folders for old ancestors.
+7. Apply folder deltas to old ancestors: `size -= old.size`, `total_file_count -= 1`.
+8. If the deleted object's `uploaded_at` equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
+9. Delete object row.
 10. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
 11. Update index_buckets.last_event_at.
 ```
@@ -1260,8 +1335,8 @@ Fallback should be disabled once both buckets are fully indexed.
 | --- | --- |
 | Directory request | O(direct children) |
 | Full scan | O(total objects * path depth), offline |
-| Create/overwrite event | O(path depth) for event write, plus queued recompute |
-| Delete event | O(path depth) for event write, plus queued recompute |
+| Create/overwrite event | O(path depth), plus queued recompute only for timestamp-boundary cases |
+| Delete event | O(path depth), plus queued recompute only for timestamp-boundary cases |
 | Folder recompute | O(descendant files of dirty folder), offline range query |
 
 The important constraint is that expensive descendant work happens in the indexer, not in the ingress request path.
