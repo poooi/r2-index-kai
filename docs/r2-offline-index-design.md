@@ -298,6 +298,7 @@ CREATE TABLE folders (
   prefix TEXT NOT NULL,
   parent_prefix TEXT,
   name TEXT NOT NULL,
+  explicit_marker INTEGER NOT NULL DEFAULT 0,
   size INTEGER NOT NULL DEFAULT 0,
   total_file_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER,
@@ -452,6 +453,8 @@ export type BucketName = 'poi-db' | 'poi-nightlies'
 export const bucketNames = ['poi-db', 'poi-nightlies'] as const
 
 // shared/prefix.ts
+export function isFolderMarkerKey(key: string): boolean
+export function normalizeObjectKeyForIndex(key: string): string
 export function getParentPrefix(key: string): string
 export function getName(key: string): string
 export function getAncestorPrefixes(key: string): string[]
@@ -572,9 +575,14 @@ ON CONFLICT(bucket, key) DO UPDATE SET
 
 -- ensure folder
 INSERT INTO folders (
-  bucket, prefix, parent_prefix, name, updated_at
-) VALUES (?, ?, ?, ?, ?)
+  bucket, prefix, parent_prefix, name, explicit_marker, updated_at
+) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(bucket, prefix) DO NOTHING;
+
+-- set explicit folder marker
+UPDATE folders
+SET explicit_marker = ?, updated_at = ?
+WHERE bucket = ? AND prefix = ?;
 
 -- mark folder dirty
 UPDATE folders
@@ -634,6 +642,20 @@ SET
   updated_at = ?,
   lease_expires_at = NULL
 WHERE bucket = ? AND generation = ? AND kind = 'full-scan';
+
+-- delete empty non-marker folder with no child folders
+DELETE FROM folders
+WHERE bucket = ?
+  AND prefix = ?
+  AND prefix != ''
+  AND explicit_marker = 0
+  AND total_file_count = 0
+  AND NOT EXISTS (
+    SELECT 1
+    FROM folders child
+    WHERE child.bucket = folders.bucket
+      AND child.parent_prefix = folders.prefix
+  );
 ```
 
 Use `env.R2_INDEX_DB.batch()` for groups of prepared statements where all statements must succeed together. Cloudflare's 100-bound-parameter limit applies to each SQL statement, not the whole batch, but batches should still stay small for latency and query-count control. With the current object upsert shape, process at most 10 objects per D1 batch and loop inside the 50-object R2 scan page.
@@ -742,6 +764,8 @@ shared/prefix.test.ts
   - nested key
   - no-slash key
   - Unicode key
+  - trailing-slash folder marker key
+  - folder marker key does not self-parent
   - getPrefixUpperBound ordering
 
 shared/buckets.test.ts
@@ -898,22 +922,36 @@ Implementation acceptance criteria:
 Use these helpers consistently:
 
 ```ts
+const isFolderMarkerKey = (key: string) => {
+  return key !== '' && key.endsWith('/')
+}
+
+const normalizeObjectKeyForIndex = (key: string) => {
+  if (!isFolderMarkerKey(key)) {
+    return key
+  }
+  return key.slice(0, -1)
+}
+
 const getParentPrefix = (key: string) => {
-  const index = key.lastIndexOf('/')
-  return index === -1 ? '' : key.slice(0, index + 1)
+  const normalized = normalizeObjectKeyForIndex(key)
+  const index = normalized.lastIndexOf('/')
+  return index === -1 ? '' : normalized.slice(0, index + 1)
 }
 
 const getName = (key: string) => {
-  const index = key.lastIndexOf('/')
-  return index === -1 ? key : key.slice(index + 1)
+  const normalized = normalizeObjectKeyForIndex(key)
+  const index = normalized.lastIndexOf('/')
+  return index === -1 ? normalized : normalized.slice(index + 1)
 }
 
 const getAncestorPrefixes = (key: string) => {
   const prefixes = ['']
-  let slash = key.indexOf('/')
+  const normalized = normalizeObjectKeyForIndex(key)
+  let slash = normalized.indexOf('/')
   while (slash !== -1) {
-    prefixes.push(key.slice(0, slash + 1))
-    slash = key.indexOf('/', slash + 1)
+    prefixes.push(normalized.slice(0, slash + 1))
+    slash = normalized.indexOf('/', slash + 1)
   }
   return prefixes
 }
@@ -945,6 +983,19 @@ parent_prefix = "a/b/"
 name = "file.zip"
 ancestors = ["", "a/", "a/b/"]
 ```
+
+For folder-marker object `a/b/`:
+
+```text
+isFolderMarkerKey = true
+normalized = "a/b"
+folder prefix = "a/b/"
+parent_prefix = "a/"
+name = "b"
+ancestors = ["", "a/"]
+```
+
+Folder-marker objects are not inserted into `objects`, do not contribute to `size`, and do not increment `total_file_count`. They only set `folders.explicit_marker = 1` so intentionally empty folders can be listed. Deleting a folder-marker object sets `explicit_marker = 0`; the folder row is deleted only if `total_file_count = 0` and there are no child folders.
 
 Folder metadata definitions:
 
@@ -1119,6 +1170,7 @@ For each configured bucket:
 3. For each object:
    - run `bucket.head(object.key)` and skip the object if it no longer exists
    - use the `head()` result, not the possibly stale list item, for size/uploaded/etag
+   - if `isFolderMarkerKey(object.key)` is true, ensure the corresponding folder row, set `explicit_marker = 1`, mark ancestors dirty if needed, and do not insert an `objects` row
    - compute parent_prefix, name, ancestors
    - upsert objects row
    - set seen_generation = job.generation
@@ -1155,7 +1207,7 @@ The per-object `head()` call is intentional. It prevents a full-scan page from r
 
 ```text
 1. If any folders still have needs_recompute = 1, enqueue another finalize-full-scan with delay and return.
-2. Delete empty folder rows except the root folder.
+2. Delete empty folder rows except the root folder and explicit folder-marker rows.
 3. Mark index_buckets status = 'ready' and set last_scan_finished_at = Date.now().
 4. Mark the index_runs row status = 'finished' and set finished_at = Date.now().
 5. Clear the scan lease.
@@ -1172,16 +1224,17 @@ The full scan never loads the whole bucket into memory.
 2. Resolve event bucket to R2 binding.
 3. Run bucket.head(object.key).
 4. If head returns null, process as delete.
-5. Read old objects row.
-6. Upsert the objects row with current size/uploaded/etag.
-7. If `index_buckets.status = 'scanning'`, set `seen_generation` to the active bucket generation so a concurrent full scan cannot delete this fresh object as stale.
-8. Ensure folder rows exist for all old and new ancestors.
-9. Apply folder deltas to old and new ancestors:
+5. If `isFolderMarkerKey(object.key)` is true, ensure the corresponding folder row, set `explicit_marker = 1`, update `index_buckets.last_event_at`, acknowledge the event, and stop.
+6. Read old objects row.
+7. Upsert the objects row with current size/uploaded/etag.
+8. If `index_buckets.status = 'scanning'`, set `seen_generation` to the active bucket generation so a concurrent full scan cannot delete this fresh object as stale.
+9. Ensure folder rows exist for all old and new ancestors.
+10. Apply folder deltas to old and new ancestors:
    - new object: `size += new.size`, `total_file_count += 1`, `created_at = min(created_at, new.uploaded_at)`, `modified_at = max(modified_at, new.uploaded_at)`
    - overwrite: `size += new.size - old.size`, `total_file_count += 0`
-10. If an overwrite changes a timestamp that currently equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
-11. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
-12. Update index_buckets.last_event_at.
+11. If an overwrite changes a timestamp that currently equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
+12. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
+13. Update index_buckets.last_event_at.
 ```
 
 Do not recompute every ancestor on every create event. The root folder may contain the whole bucket, so request-time-like full subtree recomputes must not happen in normal event handling. Use arithmetic deltas for size/count and reserve range-query recomputes for timestamp-boundary cases.
@@ -1195,13 +1248,14 @@ Boundary recomputes are queued scan jobs, never inline event work. If the root p
 2. Resolve event bucket to R2 binding.
 3. Run bucket.head(object.key).
 4. If object still exists, ignore the delete event as stale/out-of-order.
-5. Read old objects row.
-6. If missing, no-op.
-7. Apply folder deltas to old ancestors: `size -= old.size`, `total_file_count -= 1`.
-8. If the deleted object's `uploaded_at` equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
-9. Delete object row.
-10. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
-11. Update index_buckets.last_event_at.
+5. If `isFolderMarkerKey(object.key)` is true, set the corresponding folder row `explicit_marker = 0`, delete the folder row only when it has no files and no child folders, update `index_buckets.last_event_at`, acknowledge the event, and stop.
+6. Read old objects row.
+7. If missing, no-op.
+8. Apply folder deltas to old ancestors: `size -= old.size`, `total_file_count -= 1`.
+9. If the deleted object's `uploaded_at` equals an ancestor folder's `created_at` or `modified_at`, mark that ancestor dirty and enqueue recompute-folders for only those boundary-affected ancestors.
+10. Delete object row.
+11. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
+12. Update index_buckets.last_event_at.
 ```
 
 Duplicate events are safe because all operations are idempotent.
@@ -1253,7 +1307,7 @@ WHERE bucket = ?
   AND prefix = ?;
 ```
 
-After a recompute sets `total_file_count = 0`, delete that folder row unless `prefix = ''`.
+After a recompute sets `total_file_count = 0`, delete that folder row only when `prefix != ''`, `explicit_marker = 0`, and no child folder has `parent_prefix = folders.prefix`.
 
 ## Worker code layout
 
