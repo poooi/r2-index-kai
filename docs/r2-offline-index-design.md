@@ -9,7 +9,7 @@ This design makes request-time directory listing complexity proportional to the 
 ```text
 R2 bucket
   -> R2 event notification
-  -> Cloudflare Queue
+  -> Cloudflare event Queue
   -> indexer Worker
   -> D1 canonical index
   -> ingress Worker reads D1
@@ -23,6 +23,7 @@ R2 bucket
 | File metadata index | D1 | Canonical indexed metadata |
 | Folder aggregate index | D1 | Canonical folder size/count/time metadata |
 | R2 event stream | Cloudflare Queue | Async indexing and retries |
+| Full-scan and recompute jobs | Separate Cloudflare Queue | Isolates heavy jobs from event batching |
 | Short-lived listing/miss cache | Existing `R2_INDEX_CACHE` KV | Optional cache only, not source of truth |
 
 D1 is the canonical index store. KV must not be used as the canonical index because folder aggregates require transactional updates, indexed prefix queries, and recomputation after deletes.
@@ -40,14 +41,20 @@ Create indexing queues:
 ```sh
 wrangler queues create r2-index-kai-events
 wrangler queues create r2-index-kai-events-dlq
+wrangler queues create r2-index-kai-scan
+wrangler queues create r2-index-kai-scan-dlq
 ```
 
 Configure R2 event notifications for both buckets:
 
 ```sh
-wrangler r2 bucket notification create poi-db --event-type object-create --event-type object-delete --queue r2-index-kai-events
-wrangler r2 bucket notification create poi-nightlies --event-type object-create --event-type object-delete --queue r2-index-kai-events
+wrangler r2 bucket notification create poi-db --event-type object-create --queue r2-index-kai-events
+wrangler r2 bucket notification create poi-db --event-type object-delete --queue r2-index-kai-events
+wrangler r2 bucket notification create poi-nightlies --event-type object-create --queue r2-index-kai-events
+wrangler r2 bucket notification create poi-nightlies --event-type object-delete --queue r2-index-kai-events
 ```
+
+Use separate notification commands per event type because Cloudflare's documented Wrangler form accepts one `--event-type <EVENT_TYPE>` per command.
 
 ## Wrangler configuration
 
@@ -110,23 +117,35 @@ Add `wrangler.indexer.jsonc`:
   ],
   "queues": {
     "producers": [
-      { "binding": "R2_INDEX_QUEUE", "queue": "r2-index-kai-events" }
+      { "binding": "R2_INDEX_SCAN_QUEUE", "queue": "r2-index-kai-scan" }
     ],
     "consumers": [
       {
         "queue": "r2-index-kai-events",
-        "max_batch_size": 50,
+        "max_batch_size": 25,
         "max_batch_timeout": 10,
         "max_retries": 5,
         "dead_letter_queue": "r2-index-kai-events-dlq"
+      },
+      {
+        "queue": "r2-index-kai-scan",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "r2-index-kai-scan-dlq"
       }
     ]
+  },
+  "limits": {
+    "cpu_ms": 300000
   },
   "triggers": {
     "crons": ["17 */6 * * *"]
   }
 }
 ```
+
+R2 writes directly to `r2-index-kai-events`, so the indexer does not need a producer binding for that queue. The indexer does need `R2_INDEX_SCAN_QUEUE` so cron and event handlers can enqueue bounded scan/recompute jobs.
 
 ## Site mapping
 
@@ -188,6 +207,9 @@ CREATE INDEX objects_by_parent
 CREATE INDEX objects_by_generation
   ON objects(bucket, seen_generation);
 
+CREATE INDEX objects_by_key
+  ON objects(bucket, key);
+
 CREATE TABLE folders (
   bucket TEXT NOT NULL,
   prefix TEXT NOT NULL,
@@ -208,16 +230,6 @@ CREATE INDEX folders_by_parent
 CREATE INDEX folders_needing_recompute
   ON folders(bucket, needs_recompute);
 
-CREATE TABLE object_ancestors (
-  bucket TEXT NOT NULL,
-  key TEXT NOT NULL,
-  prefix TEXT NOT NULL,
-  PRIMARY KEY (bucket, key, prefix)
-);
-
-CREATE INDEX object_ancestors_by_prefix
-  ON object_ancestors(bucket, prefix);
-
 CREATE TABLE index_runs (
   id TEXT PRIMARY KEY,
   bucket TEXT NOT NULL,
@@ -225,6 +237,7 @@ CREATE TABLE index_runs (
   generation INTEGER NOT NULL,
   cursor TEXT,
   status TEXT NOT NULL,
+  lease_expires_at INTEGER,
   started_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   finished_at INTEGER
@@ -257,6 +270,25 @@ const getAncestorPrefixes = (key: string) => {
   }
   return prefixes
 }
+
+const getPrefixUpperBound = (prefix: string) => {
+  if (prefix === '') {
+    return null
+  }
+
+  const codePoints = Array.from(prefix)
+  const last = codePoints.at(-1)
+  if (last === undefined) {
+    return null
+  }
+
+  const lastCodePoint = last.codePointAt(0)!
+  if (lastCodePoint >= 0x10ffff) {
+    return null
+  }
+
+  return `${codePoints.slice(0, -1).join('')}${String.fromCodePoint(lastCodePoint + 1)}`
+}
 ```
 
 For `a/b/file.zip`:
@@ -278,7 +310,17 @@ folder.modified_at = MAX(uploaded_at of descendant files)
 
 R2 has no real folders, so `created_at` is inferred as the earliest descendant upload time.
 
+Use lexicographic range queries over `(bucket, key)` for descendant scans. Do not use `LIKE prefix || '%'`: Cloudflare D1 documents a 50-byte limit for `LIKE` or `GLOB` patterns, which makes long object prefixes unsafe.
+
 ## Ingress listing query
+
+Use a D1 Session for read-only listing queries:
+
+```ts
+const db = env.R2_INDEX_DB.withSession('first-unconstrained')
+```
+
+`first-unconstrained` allows D1 read replication to serve public directory listings from replicas after the index is ready. Use `first-primary` only for operational/admin views that must observe the newest index write.
 
 For a directory prefix:
 
@@ -324,19 +366,51 @@ and prefix is not root
 
 The route should not call `bucket.list()` for normal directory listings.
 
+## Cloudflare documentation constraints
+
+This design depends on these Cloudflare-documented constraints:
+
+| Area | Constraint | Design response |
+| --- | --- | --- |
+| R2 event notifications | Event types are `object-create` and `object-delete`; Queue message bodies contain `action`, `bucket`, `object.key`, `eventTime`, and omit size/eTag for deletes. | Normalize Cloudflare event bodies before updating D1; use `bucket.head(key)` for current create metadata and stale delete detection. |
+| R2 list API | `list()` returns at most 1000 objects, may return fewer, and pagination must use `truncated` and `cursor`. | Full scan jobs always advance by cursor and never infer completion from object count. |
+| Queues | Max consumer batch size is 100; consumer wall time is 15 minutes; default CPU is lower unless configured. | Use separate queues, `max_batch_size: 1` for scan jobs, and `limits.cpu_ms: 300000` on the indexer. |
+| D1 | One database is single-threaded, max size is 10 GB on Workers Paid, max query duration is 30 seconds, max bound parameters per query is 100, and query count per Worker invocation is limited. | Keep D1 writes bounded, remove the `object_ancestors` table, chunk recomputes, and use KV/read replication for hot listing reads if needed. |
+| D1 read replication | Read replicas are only used through the Sessions API. | Ingress listing reads should use `R2_INDEX_DB.withSession('first-unconstrained')` after the index is ready. |
+
+If either bucket's estimated index approaches 5 GB or D1 overload errors appear during scans, split into one D1 database per bucket before adding more features.
+
+Source-of-truth documentation checked for this design:
+
+- https://developers.cloudflare.com/r2/buckets/event-notifications/
+- https://developers.cloudflare.com/r2/api/workers/workers-api-reference/
+- https://developers.cloudflare.com/queues/configuration/configure-queues/
+- https://developers.cloudflare.com/queues/platform/limits/
+- https://developers.cloudflare.com/d1/platform/limits/
+- https://developers.cloudflare.com/d1/worker-api/d1-database/
+- https://developers.cloudflare.com/d1/best-practices/read-replication/
+
 ## Indexer job types
 
-Use one Queue for all indexing jobs:
+R2 event notifications arrive on `r2-index-kai-events` using Cloudflare's documented message body:
 
 ```ts
-type IndexJob =
-  | {
-      kind: 'r2-event'
-      bucket: 'poi-db' | 'poi-nightlies'
-      eventType: 'object-create' | 'object-delete'
-      key: string
-      eventTime: number
-    }
+type R2EventNotification = {
+  action: 'PutObject' | 'CopyObject' | 'CompleteMultipartUpload' | 'DeleteObject' | 'LifecycleDeletion'
+  bucket: 'poi-db' | 'poi-nightlies'
+  object: {
+    key: string
+    size?: number
+    eTag?: string
+  }
+  eventTime: string
+}
+```
+
+Full-scan and recompute jobs are internal messages on `r2-index-kai-scan`:
+
+```ts
+type ScanJob =
   | {
       kind: 'full-scan-page'
       bucket: 'poi-db' | 'poi-nightlies'
@@ -345,6 +419,16 @@ type IndexJob =
     }
   | {
       kind: 'finish-full-scan'
+      bucket: 'poi-db' | 'poi-nightlies'
+      generation: number
+    }
+  | {
+      kind: 'recompute-folders'
+      bucket: 'poi-db' | 'poi-nightlies'
+      prefixes: string[]
+    }
+  | {
+      kind: 'finalize-full-scan'
       bucket: 'poi-db' | 'poi-nightlies'
       generation: number
     }
@@ -357,27 +441,30 @@ Scheduled handler runs every six hours.
 For each configured bucket:
 
 ```text
-1. If a scan is already running for the bucket, skip.
+1. If a non-expired scan lease exists for the bucket, skip.
 2. Set generation = Date.now().
 3. Upsert index_buckets row with status = 'scanning'.
-4. Enqueue full-scan-page with no cursor.
+4. Upsert index_runs row with lease_expires_at.
+5. Enqueue full-scan-page with no cursor to R2_INDEX_SCAN_QUEUE.
 ```
 
 `full-scan-page` handler:
 
 ```text
 1. Resolve bucket name to R2 binding.
-2. List R2 with limit 1000, no delimiter, and the job cursor.
+2. List R2 with limit 50, no delimiter, and the job cursor.
 3. For each object:
    - compute parent_prefix, name, ancestors
    - upsert objects row
    - set seen_generation = job.generation
    - ensure folders rows for each ancestor
-   - upsert object_ancestors rows
    - mark affected folders needs_recompute = 1
-4. If R2 returned a cursor, enqueue the next full-scan-page.
-5. If no cursor, enqueue finish-full-scan.
+4. Extend the scan lease.
+5. If R2 returned a cursor, enqueue the next full-scan-page.
+6. If no cursor, enqueue finish-full-scan.
 ```
+
+R2 allows up to 1000 listed objects per call, but this design intentionally uses 50. The lower page size keeps D1 writes below per-invocation query limits after folder rows and dirty flags are included.
 
 `finish-full-scan` handler:
 
@@ -386,10 +473,17 @@ For each configured bucket:
 2. For each stale object:
    - mark old ancestors needs_recompute = 1
    - delete object row
-   - delete object_ancestors rows
-3. Recompute all folders where needs_recompute = 1.
-4. Delete empty folder rows except the root folder.
-5. Mark index_buckets status = 'ready'.
+3. Enqueue recompute-folders jobs in chunks of at most 25 prefixes.
+4. Enqueue finalize-full-scan.
+```
+
+`finalize-full-scan` handler:
+
+```text
+1. If any folders still have needs_recompute = 1, enqueue another finalize-full-scan with delay and return.
+2. Delete empty folder rows except the root folder.
+3. Mark index_buckets status = 'ready'.
+4. Clear the scan lease.
 ```
 
 The full scan never loads the whole bucket into memory.
@@ -399,16 +493,17 @@ The full scan never loads the whole bucket into memory.
 ### Create or overwrite
 
 ```text
-1. Resolve bucket to R2 binding.
-2. Run bucket.head(key).
-3. If head returns null, process as delete.
-4. Read old objects row.
-5. Upsert the objects row with current size/uploaded/etag.
-6. Delete and recreate object_ancestors rows for this key.
-7. Ensure folder rows exist for all ancestors.
+1. Accept actions PutObject, CopyObject, and CompleteMultipartUpload as creates.
+2. Resolve event bucket to R2 binding.
+3. Run bucket.head(object.key).
+4. If head returns null, process as delete.
+5. Read old objects row.
+6. Upsert the objects row with current size/uploaded/etag.
+7. Ensure folder rows exist for all old and new ancestors.
 8. Mark all old and new ancestors needs_recompute = 1.
-9. Recompute those folders.
-10. Update index_buckets.last_event_at.
+9. Enqueue recompute-folders for those ancestors.
+10. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
+11. Update index_buckets.last_event_at.
 ```
 
 Always recompute affected ancestors after event updates. This is slightly more expensive than arithmetic deltas but avoids timestamp edge cases and out-of-order overwrite bugs.
@@ -416,16 +511,16 @@ Always recompute affected ancestors after event updates. This is slightly more e
 ### Delete
 
 ```text
-1. Resolve bucket to R2 binding.
-2. Run bucket.head(key).
-3. If object still exists, ignore the delete event as stale/out-of-order.
-4. Read old objects row.
-5. If missing, no-op.
-6. Mark old ancestors needs_recompute = 1.
-7. Delete object row.
-8. Delete object_ancestors rows.
-9. Recompute old ancestors.
-10. Delete empty folder rows except the root folder.
+1. Accept actions DeleteObject and LifecycleDeletion as deletes.
+2. Resolve event bucket to R2 binding.
+3. Run bucket.head(object.key).
+4. If object still exists, ignore the delete event as stale/out-of-order.
+5. Read old objects row.
+6. If missing, no-op.
+7. Mark old ancestors needs_recompute = 1.
+8. Delete object row.
+9. Enqueue recompute-folders for old ancestors.
+10. Acknowledge the event only after the D1 writes and recompute enqueue succeed.
 11. Update index_buckets.last_event_at.
 ```
 
@@ -433,20 +528,32 @@ Duplicate events are safe because all operations are idempotent.
 
 ## Folder recomputation
 
-For each dirty folder prefix:
+Each `recompute-folders` job must contain at most 25 prefixes. For each prefix, compute `upperBound = getPrefixUpperBound(prefix)` and run one aggregate query.
+
+For the root prefix, omit the upper-bound predicate:
 
 ```sql
 SELECT
-  COALESCE(SUM(o.size), 0) AS size,
+  COALESCE(SUM(size), 0) AS size,
   COUNT(*) AS total_file_count,
-  MIN(o.uploaded_at) AS created_at,
-  MAX(o.uploaded_at) AS modified_at
-FROM objects o
-JOIN object_ancestors a
-  ON a.bucket = o.bucket
- AND a.key = o.key
-WHERE a.bucket = ?
-  AND a.prefix = ?;
+  MIN(uploaded_at) AS created_at,
+  MAX(uploaded_at) AS modified_at
+FROM objects
+WHERE bucket = ?;
+```
+
+For non-root prefixes:
+
+```sql
+SELECT
+  COALESCE(SUM(size), 0) AS size,
+  COUNT(*) AS total_file_count,
+  MIN(uploaded_at) AS created_at,
+  MAX(uploaded_at) AS modified_at
+FROM objects
+WHERE bucket = ?
+  AND key >= ?
+  AND key < ?;
 ```
 
 Then update the folder:
@@ -463,6 +570,8 @@ SET
 WHERE bucket = ?
   AND prefix = ?;
 ```
+
+After a recompute sets `total_file_count = 0`, delete that folder row unless `prefix = ''`.
 
 ## Worker code layout
 
@@ -517,15 +626,15 @@ Fallback should be disabled once both buckets are fully indexed.
 | --- | --- |
 | Directory request | O(direct children) |
 | Full scan | O(total objects * path depth), offline |
-| Create/overwrite event | O(path depth + affected descendant query cost for ancestors) |
-| Delete event | O(path depth + affected descendant query cost for ancestors) |
-| Folder recompute | O(descendant files of dirty folder), offline |
+| Create/overwrite event | O(path depth) for event write, plus queued recompute |
+| Delete event | O(path depth) for event write, plus queued recompute |
+| Folder recompute | O(descendant files of dirty folder), offline range query |
 
 The important constraint is that expensive descendant work happens in the indexer, not in the ingress request path.
 
 ## Deployment sequence
 
-1. Create D1 database and Queues.
+1. Create D1 database and all four Queues.
 2. Add D1 binding to `wrangler.jsonc`.
 3. Add `wrangler.indexer.jsonc`.
 4. Add D1 migration and apply it:
@@ -540,7 +649,8 @@ The important constraint is that expensive descendant work happens in the indexe
 8. Confirm `index_buckets.status = 'ready'` for both buckets.
 9. Change ingress directory listing route to read from D1.
 10. Deploy ingress Worker.
-11. Disable live R2 listing fallback in production.
+11. Enable D1 read replication if listing latency or read throughput becomes a bottleneck.
+12. Disable live R2 listing fallback in production.
 
 ## Operational checks
 
