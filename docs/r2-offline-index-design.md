@@ -573,7 +573,225 @@ fixtures/r2-index/
   r2-delete-event.json
 ```
 
-The implementation PR should include unit tests for prefix helpers and pure job normalization. If no test runner exists yet, add Vitest for these pure TypeScript tests. End-to-end R2 event delivery can be tested manually with synthetic Queue messages because local R2 event notifications are not the source of truth for production behavior.
+## Validation plan
+
+The implementation PR must include automated unit tests, local integration tests, and local Worker E2E tests using Cloudflare's Workers Vitest integration. It should also include a documented preview smoke checklist because real R2 event notification rules are Cloudflare-managed wiring.
+
+Add these package scripts:
+
+```jsonc
+{
+  "scripts": {
+    "test": "vitest run",
+    "test:unit": "vitest run shared workers/indexer app/lib",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:integration": "vitest run tests/integration && npm run test:worker",
+    "test:e2e:preview": "tsx scripts/validate-r2-index-preview.ts"
+  }
+}
+```
+
+If no test runner exists yet, add Vitest. For Worker behavior, use Cloudflare's Workers Vitest integration (`@cloudflare/vitest-pool-workers`) rather than hand-rolled mocks. Cloudflare's integration runs tests locally in the Workers runtime using Miniflare, exposes bindings, supports isolated per-test-file storage, and provides helpers for `queue()` and `scheduled()` handlers.
+
+Add test dependencies in the implementation PR:
+
+```text
+devDependencies:
+  vitest
+  @cloudflare/vitest-pool-workers
+```
+
+Add `vitest.worker.config.ts`:
+
+```ts
+import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
+import { readD1Migrations } from '@cloudflare/vitest-pool-workers/config'
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  plugins: [
+    cloudflareTest(async () => ({
+      wrangler: {
+        configPath: './wrangler.indexer.jsonc',
+      },
+      miniflare: {
+        bindings: {
+          TEST_MIGRATIONS: await readD1Migrations('./migrations'),
+        },
+      },
+    })),
+  ],
+  test: {
+    setupFiles: ['./tests/worker/apply-migrations.ts'],
+  },
+})
+```
+
+`tests/worker/apply-migrations.ts` should apply D1 migrations before each Worker integration test and reset bindings after each test:
+
+```ts
+import { env } from 'cloudflare:workers'
+import { applyD1Migrations, reset } from 'cloudflare:test'
+import { afterEach, beforeEach } from 'vitest'
+
+declare module 'cloudflare:workers' {
+  interface ProvidedEnv extends IndexerEnv {
+    TEST_MIGRATIONS: D1Migration[]
+  }
+}
+
+beforeEach(async () => {
+  await applyD1Migrations(env.R2_INDEX_DB, env.TEST_MIGRATIONS)
+})
+
+afterEach(async () => {
+  await reset()
+})
+```
+
+### Unit tests
+
+Unit tests must not require Cloudflare resources.
+
+Required coverage:
+
+```text
+shared/prefix.test.ts
+  - root prefix
+  - single-level key
+  - nested key
+  - no-slash key
+  - Unicode key
+  - getPrefixUpperBound ordering
+
+shared/buckets.test.ts
+  - known bucket names resolve
+  - unknown bucket name is rejected
+
+workers/indexer/r2-events.test.ts
+  - PutObject -> create
+  - CopyObject -> create
+  - CompleteMultipartUpload -> create
+  - DeleteObject -> delete
+  - LifecycleDeletion -> delete
+  - malformed payload throws and does not ack
+
+workers/indexer/jobs.test.ts
+  - recompute prefixes are chunked to <= 25
+  - retry delay is capped
+  - scan jobs are serialized as JSON-compatible Queue bodies
+```
+
+### Local integration tests
+
+Integration tests should be split into two layers:
+
+1. Pure integration tests for SQL helpers and fake R2/Queue adapters.
+2. Worker integration tests running in Cloudflare's local Workers Vitest pool.
+
+Required scenarios:
+
+```text
+tests/integration/indexer-create.test.ts
+  - seed empty D1
+  - fake R2 head() returns a new object
+  - handle create event
+  - assert objects row exists
+  - assert root and parent folders exist and are dirty
+  - assert recompute job was enqueued
+
+tests/integration/indexer-delete.test.ts
+  - seed object and folder rows
+  - fake R2 head() returns null
+  - handle delete event
+  - assert object row is gone
+  - assert old ancestors are dirty
+  - assert recompute job was enqueued
+
+tests/integration/full-scan-page.test.ts
+  - fake R2 list() returns objects and cursor
+  - fake R2 head() returns current metadata for one object
+  - fake R2 head() returns null for one deleted object
+  - assert only current object is upserted
+  - assert next scan page is enqueued when cursor exists
+
+tests/integration/recompute-folders.test.ts
+  - seed nested object rows
+  - recompute root and nested prefixes
+  - assert size, total_file_count, created_at, modified_at
+  - assert empty non-root folder is deleted
+
+tests/integration/ingress-listing.test.ts
+  - seed D1 folder and file rows
+  - call listIndexedDirectory()
+  - assert folder and file result shape matches FileListing
+  - assert no R2 bucket method is called when INDEX_LIVE_FALLBACK is false
+```
+
+### Local Worker E2E tests
+
+Use Cloudflare's `cloudflare:test` helpers for local Worker E2E coverage:
+
+```text
+tests/worker/indexer-queue.test.ts
+  - createMessageBatch('r2-index-kai-events', [create notification])
+  - call indexer.queue(batch, env, ctx)
+  - getQueueResult(batch, ctx)
+  - assert explicitAcks contains the message id
+  - assert D1 object row exists
+  - assert recompute job was sent to R2_INDEX_SCAN_QUEUE
+
+tests/worker/indexer-scheduled.test.ts
+  - createScheduledController({ cron: '17 */6 * * *' })
+  - call indexer.scheduled(controller, env, ctx)
+  - assert full-scan jobs are sent for both buckets
+  - assert index_buckets rows are marked scanning
+
+tests/worker/indexer-retry.test.ts
+  - configure a failing D1/R2 path
+  - call queue handler
+  - getQueueResult(batch, ctx)
+  - assert the failed message is retried, not acked
+
+tests/worker/ingress-fetch.test.ts
+  - seed D1 with a directory listing
+  - call ingress fetch/loader through the Worker runtime where practical
+  - assert rendered response uses indexed rows
+  - assert direct R2 listing is not required
+```
+
+Use `createMessageBatch()`, `createScheduledController()`, `createExecutionContext()`, `getQueueResult()`, and `waitOnExecutionContext()` from `cloudflare:test`. Use `env` from `cloudflare:workers` for local D1, R2, KV, and Queue bindings.
+
+### Preview smoke checklist
+
+Local Worker E2E is required. Preview validation is only a smoke test for Cloudflare-managed wiring that cannot be fully proven locally, especially actual R2 event notification rules. It should run against temporary preview resources or a non-production prefix and must not mutate production object prefixes.
+
+Required preview smoke flow:
+
+```text
+1. Deploy ingress Worker and indexer Worker to preview.
+2. Apply D1 migrations to preview D1.
+3. Upload fixtures under an isolated R2 prefix, for example __r2-index-test/{runId}/.
+4. Send synthetic Queue messages matching Cloudflare R2 event notification payloads.
+5. Wait until D1 contains expected object rows.
+6. Trigger or enqueue recompute-folders.
+7. Request the preview directory URL.
+8. Assert returned HTML contains expected file names, folder names, sizes, and timestamps.
+9. Delete one fixture object.
+10. Send synthetic delete Queue message.
+11. Assert D1 object row is removed and directory response no longer includes that file.
+12. Clean up R2 fixture prefix and D1 rows for the runId.
+```
+
+Real bucket event notification delivery should be validated once per environment after Cloudflare notification rules are configured:
+
+```text
+1. Upload a tiny object to the isolated test prefix.
+2. Confirm the event Queue receives and processes the create notification.
+3. Delete the object.
+4. Confirm the event Queue receives and processes the delete notification.
+5. Confirm both messages are absent from the DLQ.
+```
 
 Implementation acceptance criteria:
 
@@ -582,13 +800,17 @@ Implementation acceptance criteria:
 2. `npm run typecheck` succeeds or only shows an explicitly documented pre-existing React Router typegen issue.
 3. `drizzle-kit generate` creates the D1 migration from `shared/db/schema.ts`.
 4. `wrangler d1 migrations apply r2-index-kai-index --local` succeeds.
-5. Prefix helper tests cover root, single-level, nested, Unicode, and no-slash keys.
-6. R2 event normalization tests cover PutObject, CopyObject, CompleteMultipartUpload, DeleteObject, and LifecycleDeletion.
-7. Synthetic create event upserts an object row and dirties all ancestor folders.
-8. Synthetic delete event deletes the object row and dirties old ancestor folders.
-9. A full-scan page with a deleted object skips it after `head()` returns null.
-10. Ingress directory loader reads from D1 and does not call `bucket.list()` when `INDEX_LIVE_FALLBACK` is false.
-11. The PR effective diff has no direct request-time folder-size scan implementation.
+5. `npm run test:unit` succeeds.
+6. `npm run test:integration` succeeds.
+7. `npm run test:worker` succeeds using Cloudflare's Workers Vitest integration.
+8. `npm run test:e2e:preview` succeeds for preview resources, or the PR includes the completed manual preview smoke checklist output.
+9. Prefix helper tests cover root, single-level, nested, Unicode, and no-slash keys.
+10. R2 event normalization tests cover PutObject, CopyObject, CompleteMultipartUpload, DeleteObject, and LifecycleDeletion.
+11. Synthetic create event upserts an object row and dirties all ancestor folders.
+12. Synthetic delete event deletes the object row and dirties old ancestor folders.
+13. A full-scan page with a deleted object skips it after `head()` returns null.
+14. Ingress directory loader reads from D1 and does not call `bucket.list()` when `INDEX_LIVE_FALLBACK` is false.
+15. The PR effective diff has no direct request-time folder-size scan implementation.
 ```
 
 ## Prefix rules
@@ -738,6 +960,9 @@ Source-of-truth documentation checked for this design:
 - https://developers.cloudflare.com/d1/worker-api/d1-database/
 - https://developers.cloudflare.com/d1/best-practices/use-indexes/
 - https://developers.cloudflare.com/d1/best-practices/read-replication/
+- https://developers.cloudflare.com/workers/testing/vitest-integration/
+- https://developers.cloudflare.com/workers/testing/vitest-integration/configuration/
+- https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/
 - https://orm.drizzle.team/docs/sqlite/connect-cloudflare-d1
 - https://orm.drizzle.team/docs/drizzle-kit-generate
 - https://orm.drizzle.team/docs/drizzle-kit-migrate
