@@ -433,7 +433,7 @@ export interface IngressEnv {
   R2_INDEX_DB: D1Database
   BUCKET_POI_DB: R2Bucket
   BUCKET_POI_NIGHTLIES: R2Bucket
-  INDEX_LIVE_FALLBACK?: string
+  INDEX_LIVE_FALLBACK?: 'true' | 'false'
 }
 
 export interface IndexerEnv {
@@ -1328,11 +1328,14 @@ Reconsider a monorepo only if the project later has independent deploy pipelines
 
 ## Ingress fallback policy
 
-Use a configuration flag:
+Use a string-backed Worker configuration flag:
 
 ```ts
-INDEX_LIVE_FALLBACK = false
+const isLiveFallbackEnabled = (env: IngressEnv) =>
+  env.INDEX_LIVE_FALLBACK === 'true'
 ```
+
+Production should omit `INDEX_LIVE_FALLBACK` or set it to `'false'`. Treat only the exact string `'true'` as enabled; do not use truthiness for this flag.
 
 Production target behavior:
 
