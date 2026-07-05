@@ -878,16 +878,14 @@ Required preview smoke flow:
 ```text
 1. Deploy ingress Worker and indexer Worker to preview.
 2. Apply D1 migrations to preview D1.
-3. Upload fixtures under an isolated R2 prefix, for example __r2-index-test/{runId}/.
-4. Send synthetic Queue messages matching Cloudflare R2 event notification payloads.
-5. Wait until D1 contains expected object rows.
-6. Trigger or enqueue recompute-folders.
-7. Request the preview directory URL.
-8. Assert returned HTML contains expected file names, folder names, sizes, and timestamps.
-9. Delete one fixture object.
-10. Send synthetic delete Queue message.
-11. Assert D1 object row is removed and directory response no longer includes that file.
-12. Clean up R2 fixture prefix and D1 rows for the runId.
+3. Set E2E_BUCKET_NAME and E2E_PUBLIC_BASE_URL.
+4. Run npm run test:e2e:preview.
+5. The script uploads a fixture under __r2-index-test/{runId}/.
+6. The script waits until the R2 create notification indexes the object in D1.
+7. The script requests the public directory URL and asserts the fixture is listed.
+8. The script deletes the fixture object.
+9. The script waits until the R2 delete notification removes the D1 object row.
+10. The script cleans up the R2 object and D1 test rows.
 ```
 
 Real bucket event notification delivery should be validated once per environment after Cloudflare notification rules are configured:
