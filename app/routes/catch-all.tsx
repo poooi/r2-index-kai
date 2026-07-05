@@ -3,7 +3,7 @@ import type { Route } from "./+types/catch-all";
 import { Fragment } from "react";
 
 import { FilterInput } from "@/components/file-listing/filter-input";
-import { DataType, type FileListing } from "@/components/file-listing/model";
+import type { FileListing } from "@/components/file-listing/model";
 import { IndexTable } from "@/components/file-listing/table";
 import { data, Link } from "react-router";
 
@@ -14,8 +14,24 @@ import {
   BreadcrumbList,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import {
+  getBucketIndexStatus,
+  indexedDirectoryExists,
+  listIndexedDirectory,
+} from "@/lib/index-db";
+import { buildLiveFileListing, liveDirectoryExists } from "@/lib/live-listing";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
+import type { BucketName } from "~/buckets";
+import type { IngressEnv } from "~/env";
+
+const isLiveFallbackEnabled = (env: IngressEnv) =>
+  env.INDEX_LIVE_FALLBACK === "true";
+
+const getIndexStatus = async (env: IngressEnv, bucketName: BucketName) => {
+  const primaryDb = env.R2_INDEX_DB.withSession("first-primary");
+  return getBucketIndexStatus(primaryDb, bucketName);
+};
 
 export const loader = async ({
   request,
@@ -28,7 +44,8 @@ export const loader = async ({
   }
 
   const cfContext = await context.cloudflare;
-  const site = getSite(cfContext.env, host);
+  const env = cfContext.env as IngressEnv;
+  const site = getSite(env, host);
 
   let { "*": splats = "" } = params;
   if (splats.endsWith("/")) {
@@ -37,6 +54,7 @@ export const loader = async ({
   const prefix = splats ? `${splats}/` : "";
 
   let result: FileListing[] = [];
+  let listingSource: "cache" | "index" | "live" = "cache";
 
   const cached = await cfContext.env.R2_INDEX_CACHE.get<string>(
     getBucketDataCacheKey(splats, host)
@@ -45,38 +63,49 @@ export const loader = async ({
   if (cached !== null) {
     result = JSON.parse(cached) as FileListing[];
   } else {
-    const listResult = await listBucket(site.bucket, {
-      prefix,
-      delimiter: "/",
-      include: ["httpMetadata", "customMetadata"],
-    });
+    const indexStatus = await getIndexStatus(env, site.bucketName);
 
-    result = [
-      ...listResult.delimitedPrefixes.map((delimitedPrefix) => ({
-        key: delimitedPrefix,
-        href: `/${delimitedPrefix}`,
-        type: DataType.Folder,
-      })),
-      ...listResult.objects.map((object) => ({
-        key: object.key,
-        href: `/${object.key}`,
-        type: DataType.File,
-        size: object.size,
-        modified: object.uploaded.getTime(),
-      })),
-    ] satisfies FileListing[];
-    cfContext.ctx.waitUntil(
-      cfContext.env.R2_INDEX_CACHE.put(
-        getBucketDataCacheKey(splats, host),
-        JSON.stringify(result),
-        {
-          expirationTtl: 60,
-        }
-      )
-    );
+    if (indexStatus === "ready") {
+      const db = env.R2_INDEX_DB.withSession("first-unconstrained");
+      result = await listIndexedDirectory(db, site.bucketName, prefix);
+      listingSource = "index";
+    } else if (isLiveFallbackEnabled(env)) {
+      const listResult = await listBucket(site.bucket, {
+        prefix,
+        delimiter: "/",
+        include: ["httpMetadata", "customMetadata"],
+      });
+
+      result = buildLiveFileListing(listResult);
+      listingSource = "live";
+    } else {
+      throw data("index not ready", { status: 503 });
+    }
+    if (result.length > 0) {
+      cfContext.ctx.waitUntil(
+        cfContext.env.R2_INDEX_CACHE.put(
+          getBucketDataCacheKey(splats, host),
+          JSON.stringify(result),
+          {
+            expirationTtl: 60,
+          }
+        )
+      );
+    }
   }
 
-  if (result.length === 0) {
+  const directoryExists =
+    prefix === "" ||
+    result.length > 0 ||
+    (listingSource === "live"
+      ? await liveDirectoryExists(site.bucket, prefix)
+      : await indexedDirectoryExists(
+          env.R2_INDEX_DB.withSession("first-unconstrained"),
+          site.bucketName,
+          prefix,
+        ));
+
+  if (result.length === 0 && !directoryExists) {
     throw data(null, { status: 404 });
   }
 

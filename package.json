@@ -1,14 +1,29 @@
 {
   "name": "r2-index-kai",
   "private": true,
+  "packageManager": "pnpm@11.8.0",
   "type": "module",
   "scripts": {
     "build": "react-router build",
     "cf-typegen": "wrangler types",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply r2-index-kai-index --local",
+    "db:migrate:remote": "wrangler d1 migrations apply r2-index-kai-index --remote",
     "deploy": "npm run build && wrangler deploy",
+    "deploy:all": "npm run deploy:ingress && npm run deploy:indexer",
+    "deploy:indexer": "wrangler deploy --config wrangler.indexer.jsonc",
+    "deploy:ingress": "npm run build && wrangler deploy",
     "dev": "react-router dev",
     "postinstall": "npm run cf-typegen",
     "preview": "npm run build && vite preview",
+    "test": "vitest run",
+    "test:e2e": "npm run test:worker",
+    "test:e2e:offline": "npm run test:worker",
+    "test:integration": "vitest run tests/integration && npm run test:worker",
+    "test:unit": "vitest run shared workers/indexer app/lib",
+    "test:worker": "npm run test:worker:indexer && npm run test:worker:ingress",
+    "test:worker:indexer": "vitest run --config vitest.worker.indexer.config.ts",
+    "test:worker:ingress": "vitest run --config vitest.worker.ingress.config.ts",
     "typecheck": "npm run cf-typegen && react-router typegen && tsc -b"
   },
   "dependencies": {
@@ -16,6 +31,7 @@
     "@tanstack/react-table": "^8.21.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "drizzle-orm": "^0.45.2",
     "filesize": "^10.1.6",
     "isbot": "^5.1.27",
     "jotai": "^2.12.5",
@@ -27,12 +43,14 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.35.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.0",
     "@faker-js/faker": "^9.8.0",
     "@react-router/dev": "^7.5.3",
     "@tailwindcss/vite": "^4.1.4",
     "@types/node": "^20",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
+    "drizzle-kit": "^0.31.10",
     "execa": "^9.6.0",
     "p-each-series": "^3.0.0",
     "rimraf": "^6.0.1",
@@ -42,6 +60,7 @@
     "typescript": "^5.8.3",
     "vite": "^6.3.3",
     "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^4.1.9",
     "wrangler": "^4.87.0"
   }
 }

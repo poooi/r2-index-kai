@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "r2-index-kai-indexer",
+  "compatibility_date": "2025-04-04",
+  "main": "./workers/indexer.ts",
+  "workers_dev": false,
+  "r2_buckets": [
+    { "binding": "BUCKET_POI_DB", "bucket_name": "poi-db" },
+    { "binding": "BUCKET_POI_NIGHTLIES", "bucket_name": "poi-nightlies" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "R2_INDEX_DB",
+      "database_name": "r2-index-kai-index",
+      "database_id": "7675010a-76bc-4bc8-9b3c-39cf252fbe55",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "R2_INDEX_SCAN_QUEUE", "queue": "r2-index-kai-scan" }
+    ],
+    "consumers": [
+      {
+        "queue": "r2-index-kai-events",
+        "max_batch_size": 25,
+        "max_batch_timeout": 10,
+        "max_retries": 5,
+        "dead_letter_queue": "r2-index-kai-events-dlq",
+        "max_concurrency": 1
+      },
+      {
+        "queue": "r2-index-kai-scan",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "r2-index-kai-scan-dlq",
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "triggers": {
+    "crons": ["17 */6 * * *"]
+  }
+}

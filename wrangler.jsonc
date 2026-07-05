@@ -13,6 +13,14 @@
       "id": "4caf510805554a53968fe664289e0b98"
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "R2_INDEX_DB",
+      "database_name": "r2-index-kai-index",
+      "database_id": "7675010a-76bc-4bc8-9b3c-39cf252fbe55",
+      "migrations_dir": "migrations"
+    }
+  ],
   "routes": [
     { "pattern": "db.poi.moe/*", "zone_name": "poi.moe" },
     { "pattern": "nightlies.poi.moe/*", "zone_name": "poi.moe" },
