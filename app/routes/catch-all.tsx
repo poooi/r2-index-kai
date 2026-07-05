@@ -14,7 +14,11 @@ import {
   BreadcrumbList,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
-import { getBucketIndexStatus, listIndexedDirectory } from "@/lib/index-db";
+import {
+  getBucketIndexStatus,
+  indexedDirectoryExists,
+  listIndexedDirectory,
+} from "@/lib/index-db";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
 import type { IngressEnv } from "~/env";
@@ -93,7 +97,15 @@ export const loader = async ({
     );
   }
 
-  if (result.length === 0 && prefix !== "") {
+  const directoryExists =
+    cached !== null ||
+    (await indexedDirectoryExists(
+      env.R2_INDEX_DB.withSession("first-unconstrained"),
+      site.bucketName,
+      prefix,
+    ));
+
+  if (result.length === 0 && !directoryExists) {
     throw data(null, { status: 404 });
   }
 

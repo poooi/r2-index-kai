@@ -152,5 +152,11 @@ INSERT INTO objects (
         prefixes: ['a/'],
       },
     ])
+    const rootFolder = await env.R2_INDEX_DB.prepare(
+      'SELECT needs_recompute FROM folders WHERE bucket = ? AND prefix = ?',
+    )
+      .bind('poi-db', '')
+      .first<{ needs_recompute: number }>()
+    expect(rootFolder?.needs_recompute).toBe(1)
   })
 })

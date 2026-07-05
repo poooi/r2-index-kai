@@ -151,8 +151,8 @@ const handleCreate = async (env: IndexerEnv, event: R2EventNotification) => {
     newObject,
   )
 
+  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, dirtyPrefixes)
   const recomputePrefixes = getEventDrivenRecomputePrefixes(dirtyPrefixes)
-  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, recomputePrefixes)
   await enqueueRecomputeFolders(
     env.R2_INDEX_SCAN_QUEUE,
     event.bucket,
@@ -193,8 +193,8 @@ const handleDelete = async (env: IndexerEnv, event: R2EventNotification) => {
 
   const dirtyPrefixes = await applyDeleteFolderDeltas(env, event.bucket, oldObject)
   await deleteObject(env.R2_INDEX_DB, event.bucket, oldObject.key)
+  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, dirtyPrefixes)
   const recomputePrefixes = getEventDrivenRecomputePrefixes(dirtyPrefixes)
-  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, recomputePrefixes)
   await enqueueRecomputeFolders(
     env.R2_INDEX_SCAN_QUEUE,
     event.bucket,

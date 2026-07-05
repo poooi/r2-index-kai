@@ -2,7 +2,10 @@ import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 
 import { DataType } from '../../../app/components/file-listing/model'
-import { listIndexedDirectory } from '../../../app/lib/index-db'
+import {
+  indexedDirectoryExists,
+  listIndexedDirectory,
+} from '../../../app/lib/index-db'
 
 describe('listIndexedDirectory', () => {
   it('reads directory entries from D1', async () => {
@@ -44,5 +47,25 @@ INSERT INTO objects (
         modified: now,
       },
     ])
+  })
+
+  it('detects empty indexed directories', async () => {
+    const now = Date.now()
+    await env.R2_INDEX_DB.prepare(
+      `
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, explicit_marker, marker_seen_generation, size, total_file_count, created_at, modified_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+    )
+      .bind('poi-db', 'empty/', '', 'empty', 1, now, 0, 0, null, null, now)
+      .run()
+
+    await expect(
+      indexedDirectoryExists(env.R2_INDEX_DB, 'poi-db', 'empty/'),
+    ).resolves.toBe(true)
+    await expect(
+      listIndexedDirectory(env.R2_INDEX_DB, 'poi-db', 'empty/'),
+    ).resolves.toEqual([])
   })
 })

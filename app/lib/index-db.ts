@@ -66,3 +66,20 @@ export const getBucketIndexStatus = async (
 
   return result?.status
 }
+
+export const indexedDirectoryExists = async (
+  db: D1Queryable,
+  bucket: BucketName,
+  prefix: string,
+) => {
+  if (prefix === '') {
+    return true
+  }
+
+  const result = await db
+    .prepare('SELECT 1 AS found FROM folders WHERE bucket = ? AND prefix = ?')
+    .bind(bucket, prefix)
+    .first<{ found: number }>()
+
+  return result !== null
+}
