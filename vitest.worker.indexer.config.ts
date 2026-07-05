@@ -4,7 +4,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   plugins: [
-    tsconfigPaths(),
+    tsconfigPaths({ projects: ['./tsconfig.cloudflare.json'] }),
     cloudflareTest(async () => ({
       wrangler: {
         configPath: './wrangler.indexer.jsonc',
