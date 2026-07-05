@@ -98,7 +98,8 @@ export const loader = async ({
   }
 
   const directoryExists =
-    cached !== null ||
+    prefix === "" ||
+    result.length > 0 ||
     (await indexedDirectoryExists(
       env.R2_INDEX_DB.withSession("first-unconstrained"),
       site.bucketName,
