@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { DataType } from '@/components/file-listing/model'
-import { buildLiveFileListing } from './live-listing'
+import { buildLiveFileListing, liveDirectoryExists } from './live-listing'
 
 const createObject = (key: string, size = 0) =>
   ({
@@ -32,6 +32,30 @@ describe('buildLiveFileListing', () => {
         modified: 1000,
       },
     ])
+  })
+
+  describe('liveDirectoryExists', () => {
+    it('detects empty marker-backed directories', async () => {
+      await expect(
+        liveDirectoryExists(
+          {
+            head: async () => createObject('empty/'),
+          },
+          'empty/',
+        ),
+      ).resolves.toBe(true)
+    })
+
+    it('does not treat missing marker objects as directories', async () => {
+      await expect(
+        liveDirectoryExists(
+          {
+            head: async () => null,
+          },
+          'missing/',
+        ),
+      ).resolves.toBe(false)
+    })
   })
 
   it('ignores marker objects that are not returned as delimited prefixes', () => {

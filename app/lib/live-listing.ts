@@ -2,6 +2,7 @@ import { DataType, type FileListing } from '@/components/file-listing/model'
 import { isFolderMarkerKey } from '~/prefix'
 
 type R2ListForListing = Pick<R2Objects, 'delimitedPrefixes' | 'objects'>
+type R2BucketForExistence = Pick<R2Bucket, 'head'>
 
 export const buildLiveFileListing = (
   listResult: R2ListForListing,
@@ -25,4 +26,16 @@ export const buildLiveFileListing = (
         modified: object.uploaded.getTime(),
       })),
   ] satisfies FileListing[]
+}
+
+export const liveDirectoryExists = async (
+  bucket: R2BucketForExistence,
+  prefix: string,
+) => {
+  if (prefix === '') {
+    return true
+  }
+
+  const marker = await bucket.head(prefix)
+  return marker !== null && isFolderMarkerKey(marker.key)
 }

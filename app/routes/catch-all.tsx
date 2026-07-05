@@ -19,7 +19,7 @@ import {
   indexedDirectoryExists,
   listIndexedDirectory,
 } from "@/lib/index-db";
-import { buildLiveFileListing } from "@/lib/live-listing";
+import { buildLiveFileListing, liveDirectoryExists } from "@/lib/live-listing";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
 import type { BucketName } from "~/buckets";
@@ -54,6 +54,7 @@ export const loader = async ({
   const prefix = splats ? `${splats}/` : "";
 
   let result: FileListing[] = [];
+  let listingSource: "cache" | "index" | "live" = "cache";
 
   const cached = await cfContext.env.R2_INDEX_CACHE.get<string>(
     getBucketDataCacheKey(splats, host)
@@ -67,6 +68,7 @@ export const loader = async ({
     if (indexStatus === "ready") {
       const db = env.R2_INDEX_DB.withSession("first-unconstrained");
       result = await listIndexedDirectory(db, site.bucketName, prefix);
+      listingSource = "index";
     } else if (isLiveFallbackEnabled(env)) {
       const listResult = await listBucket(site.bucket, {
         prefix,
@@ -75,28 +77,33 @@ export const loader = async ({
       });
 
       result = buildLiveFileListing(listResult);
+      listingSource = "live";
     } else {
       throw data("index not ready", { status: 503 });
     }
-    cfContext.ctx.waitUntil(
-      cfContext.env.R2_INDEX_CACHE.put(
-        getBucketDataCacheKey(splats, host),
-        JSON.stringify(result),
-        {
-          expirationTtl: 60,
-        }
-      )
-    );
+    if (result.length > 0) {
+      cfContext.ctx.waitUntil(
+        cfContext.env.R2_INDEX_CACHE.put(
+          getBucketDataCacheKey(splats, host),
+          JSON.stringify(result),
+          {
+            expirationTtl: 60,
+          }
+        )
+      );
+    }
   }
 
   const directoryExists =
     prefix === "" ||
     result.length > 0 ||
-    (await indexedDirectoryExists(
-      env.R2_INDEX_DB.withSession("first-unconstrained"),
-      site.bucketName,
-      prefix,
-    ));
+    (listingSource === "live"
+      ? await liveDirectoryExists(site.bucket, prefix)
+      : await indexedDirectoryExists(
+          env.R2_INDEX_DB.withSession("first-unconstrained"),
+          site.bucketName,
+          prefix,
+        ));
 
   if (result.length === 0 && !directoryExists) {
     throw data(null, { status: 404 });
