@@ -179,7 +179,9 @@ const handleDelete = async (env: IndexerEnv, event: R2EventNotification) => {
       0,
       Date.now(),
     )
-    for (const prefix of getAncestorPrefixes(event.object.key).reverse()) {
+    for (const prefix of getAncestorPrefixes(event.object.key)
+      .filter((prefix) => prefix !== '')
+      .reverse()) {
       await deleteEmptyFolder(env.R2_INDEX_DB, event.bucket, prefix)
     }
     await updateLastEventAt(env, event.bucket)
@@ -207,7 +209,7 @@ const handleDelete = async (env: IndexerEnv, event: R2EventNotification) => {
   )
   await updateLastEventAt(env, event.bucket)
 
-  for (const prefix of dirtyPrefixes) {
+  for (const prefix of dirtyPrefixes.filter((prefix) => prefix !== '')) {
     await deleteEmptyFolder(env.R2_INDEX_DB, event.bucket, prefix)
   }
 }

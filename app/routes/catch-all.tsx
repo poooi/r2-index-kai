@@ -3,7 +3,7 @@ import type { Route } from "./+types/catch-all";
 import { Fragment } from "react";
 
 import { FilterInput } from "@/components/file-listing/filter-input";
-import { DataType, type FileListing } from "@/components/file-listing/model";
+import type { FileListing } from "@/components/file-listing/model";
 import { IndexTable } from "@/components/file-listing/table";
 import { data, Link } from "react-router";
 
@@ -19,6 +19,7 @@ import {
   indexedDirectoryExists,
   listIndexedDirectory,
 } from "@/lib/index-db";
+import { buildLiveFileListing } from "@/lib/live-listing";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
 import type { BucketName } from "~/buckets";
@@ -79,21 +80,7 @@ export const loader = async ({
         include: ["httpMetadata", "customMetadata"],
       });
 
-      result = [
-        ...listResult.delimitedPrefixes.map((delimitedPrefix) => ({
-          key: delimitedPrefix,
-          href: `/${delimitedPrefix}`,
-          type: DataType.Folder,
-        })),
-        ...listResult.objects.map((object) => ({
-          key: object.key,
-          href: `/${object.key}`,
-          type: DataType.File,
-          size: object.size,
-          created: object.uploaded.getTime(),
-          modified: object.uploaded.getTime(),
-        })),
-      ] satisfies FileListing[];
+      result = buildLiveFileListing(listResult);
     } else {
       throw data("index not ready", { status: 503 });
     }
