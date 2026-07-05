@@ -1,6 +1,7 @@
 {
   "name": "r2-index-kai",
   "private": true,
+  "packageManager": "pnpm@11.8.0",
   "type": "module",
   "scripts": {
     "build": "react-router build",
