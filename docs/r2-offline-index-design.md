@@ -1169,7 +1169,7 @@ For each configured bucket:
 
 ```text
 1. Resolve bucket name to R2 binding.
-2. List R2 with limit 50, no delimiter, and the job cursor.
+2. List R2 with limit 10, no delimiter, and the job cursor.
 3. For each object:
    - run `bucket.head(object.key)` and skip the object if it no longer exists
    - use the `head()` result, not the possibly stale list item, for size/uploaded/etag
@@ -1184,7 +1184,7 @@ For each configured bucket:
 6. If no cursor, enqueue finish-full-scan.
 ```
 
-R2 allows up to 1000 listed objects per call, but this design intentionally uses 50. The lower page size keeps D1 writes below per-invocation query limits after folder rows and dirty flags are included.
+R2 allows up to 1000 listed objects per call, but this design intentionally uses 10. The lower page size keeps D1 writes below per-invocation query limits after folder rows and dirty flags are included.
 
 The per-object `head()` call is intentional. It prevents a full-scan page from resurrecting an object that was listed just before a concurrent delete or overwrite event was processed.
 

@@ -24,7 +24,7 @@ import {
   upsertObject,
 } from './folders'
 
-const SCAN_PAGE_LIMIT = 50
+const SCAN_PAGE_LIMIT = 10
 const STALE_PAGE_LIMIT = 100
 
 const getRunId = (bucket: BucketName, generation: number) =>

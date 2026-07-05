@@ -1,7 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "r2-index-kai-indexer",
-  "account_id": "2dc3483aa62d4b5dc774ec04713893de",
   "compatibility_date": "2025-04-04",
   "main": "./workers/indexer.ts",
   "workers_dev": false,
