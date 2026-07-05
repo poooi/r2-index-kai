@@ -99,4 +99,58 @@ describe('indexer queue handler', () => {
     expect(queueResult.retryMessages).toHaveLength(1)
     consoleError.mockRestore()
   })
+
+  it('does not enqueue root recompute for delete events', async () => {
+    const uploadedAt = Date.now()
+    await env.R2_INDEX_DB.batch([
+      env.R2_INDEX_DB.prepare(
+        `
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, explicit_marker, marker_seen_generation, size, total_file_count, created_at, modified_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+      ).bind('poi-db', '', null, '', 0, 0, 5, 1, uploadedAt, uploadedAt, uploadedAt),
+      env.R2_INDEX_DB.prepare(
+        `
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, explicit_marker, marker_seen_generation, size, total_file_count, created_at, modified_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+      ).bind('poi-db', 'a/', '', 'a', 0, 0, 5, 1, uploadedAt, uploadedAt, uploadedAt),
+      env.R2_INDEX_DB.prepare(
+        `
+INSERT INTO objects (
+  bucket, key, parent_prefix, name, size, uploaded_at, etag, seen_generation, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+      ).bind('poi-db', 'a/file.txt', 'a/', 'file.txt', 5, uploadedAt, 'etag', uploadedAt, uploadedAt),
+    ])
+    const testEnv = createTestEnv()
+    const batch = createMessageBatch('r2-index-kai-events', [
+      {
+        id: 'message-1',
+        timestamp: new Date(1000),
+        attempts: 1,
+        body: {
+          action: 'DeleteObject',
+          bucket: 'poi-db',
+          object: { key: 'a/file.txt' },
+          eventTime: new Date(1000).toISOString(),
+        },
+      },
+    ])
+    const ctx = createExecutionContext()
+
+    await worker.queue(batch, testEnv.env, ctx)
+
+    const queueResult = await getQueueResult(batch, ctx)
+    expect(queueResult.explicitAcks).toEqual(['message-1'])
+    expect(testEnv.sent).toEqual([
+      {
+        kind: 'recompute-folders',
+        bucket: 'poi-db',
+        prefixes: ['a/'],
+      },
+    ])
+  })
 })

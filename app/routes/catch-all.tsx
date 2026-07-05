@@ -51,10 +51,11 @@ export const loader = async ({
   if (cached !== null) {
     result = JSON.parse(cached) as FileListing[];
   } else {
-    const db = env.R2_INDEX_DB.withSession("first-unconstrained");
-    const indexStatus = await getBucketIndexStatus(db, site.bucketName);
+    const primaryDb = env.R2_INDEX_DB.withSession("first-primary");
+    const indexStatus = await getBucketIndexStatus(primaryDb, site.bucketName);
 
     if (indexStatus === "ready") {
+      const db = env.R2_INDEX_DB.withSession("first-unconstrained");
       result = await listIndexedDirectory(db, site.bucketName, prefix);
     } else if (isLiveFallbackEnabled(env)) {
       const listResult = await listBucket(site.bucket, {

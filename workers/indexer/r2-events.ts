@@ -100,6 +100,9 @@ ON CONFLICT(bucket) DO UPDATE SET
     .bind(bucket, Date.now(), Date.now())
     .run()
 
+const getEventDrivenRecomputePrefixes = (prefixes: string[]) =>
+  prefixes.filter((prefix) => prefix !== '')
+
 const handleCreate = async (env: IndexerEnv, event: R2EventNotification) => {
   const bucket = getIndexerBucket(env, event.bucket)
   const current = await bucket.head(event.object.key)
@@ -148,8 +151,13 @@ const handleCreate = async (env: IndexerEnv, event: R2EventNotification) => {
     newObject,
   )
 
-  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, dirtyPrefixes)
-  await enqueueRecomputeFolders(env.R2_INDEX_SCAN_QUEUE, event.bucket, dirtyPrefixes)
+  const recomputePrefixes = getEventDrivenRecomputePrefixes(dirtyPrefixes)
+  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, recomputePrefixes)
+  await enqueueRecomputeFolders(
+    env.R2_INDEX_SCAN_QUEUE,
+    event.bucket,
+    recomputePrefixes,
+  )
   await updateLastEventAt(env, event.bucket)
 }
 
@@ -185,8 +193,13 @@ const handleDelete = async (env: IndexerEnv, event: R2EventNotification) => {
 
   const dirtyPrefixes = await applyDeleteFolderDeltas(env, event.bucket, oldObject)
   await deleteObject(env.R2_INDEX_DB, event.bucket, oldObject.key)
-  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, dirtyPrefixes)
-  await enqueueRecomputeFolders(env.R2_INDEX_SCAN_QUEUE, event.bucket, dirtyPrefixes)
+  const recomputePrefixes = getEventDrivenRecomputePrefixes(dirtyPrefixes)
+  await markFoldersDirty(env.R2_INDEX_DB, event.bucket, recomputePrefixes)
+  await enqueueRecomputeFolders(
+    env.R2_INDEX_SCAN_QUEUE,
+    event.bucket,
+    recomputePrefixes,
+  )
   await updateLastEventAt(env, event.bucket)
 
   for (const prefix of dirtyPrefixes) {
