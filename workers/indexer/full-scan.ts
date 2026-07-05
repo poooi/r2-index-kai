@@ -85,17 +85,25 @@ INSERT INTO index_runs (
   await enqueueFullScan(env.R2_INDEX_SCAN_QUEUE, bucket, generation)
 }
 
-const extendScanLease = (env: IndexerEnv, bucket: BucketName, generation: number) =>
-  env.R2_INDEX_DB
+const extendScanLease = async (
+  env: IndexerEnv,
+  bucket: BucketName,
+  generation: number,
+) => {
+  const result = await env.R2_INDEX_DB
     .prepare(
       `
 UPDATE index_runs
 SET lease_expires_at = ?, updated_at = ?
-WHERE bucket = ? AND generation = ? AND kind = 'full-scan'
+WHERE bucket = ? AND generation = ? AND kind = 'full-scan' AND status = 'running'
 `,
     )
     .bind(Date.now() + 15 * 60_000, Date.now(), bucket, generation)
     .run()
+  if (result.meta.changes === 0) {
+    throw new Error(`No active full-scan run for ${bucket}/${generation}`)
+  }
+}
 
 export const handleFullScanPage = async (
   env: IndexerEnv,

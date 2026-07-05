@@ -31,6 +31,7 @@ const handleScanJob = async (env: IndexerEnv, job: ScanJob) => {
       await finalizeFullScan(env, job)
       return
   }
+  throw new Error(`Unsupported scan job kind: ${(job as { kind?: unknown }).kind}`)
 }
 
 export default {

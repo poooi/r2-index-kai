@@ -21,12 +21,13 @@ import {
 } from "@/lib/index-db";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
+import type { BucketName } from "~/buckets";
 import type { IngressEnv } from "~/env";
 
 const isLiveFallbackEnabled = (env: IngressEnv) =>
   env.INDEX_LIVE_FALLBACK === "true";
 
-const getIndexStatus = async (env: IngressEnv, bucketName: string) => {
+const getIndexStatus = async (env: IngressEnv, bucketName: BucketName) => {
   const replicaDb = env.R2_INDEX_DB.withSession("first-unconstrained");
   const replicaStatus = await getBucketIndexStatus(replicaDb, bucketName);
   if (replicaStatus === "ready") {

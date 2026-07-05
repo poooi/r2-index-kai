@@ -77,4 +77,17 @@ INSERT INTO index_runs (
     ])
     expect(testEnv.sent.map((job) => job.kind)).toEqual(['finish-full-scan'])
   })
+
+  it('retries stale scan pages when no active run exists', async () => {
+    await env.BUCKET_POI_DB.put('a/file.txt', 'hello')
+    const testEnv = createTestEnv()
+
+    await expect(
+      handleFullScanPage(testEnv.env, {
+        kind: 'full-scan-page',
+        bucket: 'poi-db',
+        generation: 123,
+      }),
+    ).rejects.toThrow('No active full-scan run')
+  })
 })

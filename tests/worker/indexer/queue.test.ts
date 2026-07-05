@@ -205,4 +205,28 @@ INSERT INTO folders (
       .all<{ prefix: string }>()
     expect(folders.results).toEqual([{ prefix: '' }])
   })
+
+  it('retries unsupported scan jobs instead of acking them', async () => {
+    const testEnv = createTestEnv()
+    const batch = createMessageBatch('r2-index-kai-scan', [
+      {
+        id: 'message-1',
+        timestamp: new Date(1000),
+        attempts: 1,
+        body: {
+          kind: 'unknown-job',
+          bucket: 'poi-db',
+        },
+      },
+    ])
+    const ctx = createExecutionContext()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await worker.queue(batch, testEnv.env, ctx)
+
+    const queueResult = await getQueueResult(batch, ctx)
+    expect(queueResult.explicitAcks).toEqual([])
+    expect(queueResult.retryMessages).toHaveLength(1)
+    consoleError.mockRestore()
+  })
 })
