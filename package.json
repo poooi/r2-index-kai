@@ -17,7 +17,7 @@
     "preview": "npm run build && vite preview",
     "test": "vitest run",
     "test:e2e": "npm run test:worker",
-    "test:e2e:preview": "tsx scripts/validate-r2-index-preview.ts",
+    "test:e2e:offline": "npm run test:worker",
     "test:integration": "vitest run tests/integration && npm run test:worker",
     "test:unit": "vitest run shared workers/indexer app/lib",
     "test:worker": "npm run test:worker:indexer && npm run test:worker:ingress",

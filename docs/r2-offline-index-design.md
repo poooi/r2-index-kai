@@ -676,7 +676,7 @@ fixtures/r2-index/
 
 ## Validation plan
 
-The implementation PR must include automated unit tests, local integration tests, and local Worker E2E tests using Cloudflare's Workers Vitest integration. It should also include a documented preview smoke checklist because real R2 event notification rules are Cloudflare-managed wiring.
+The implementation PR must include automated unit tests, local integration tests, and offline local Worker E2E tests using Cloudflare's Workers Vitest integration. E2E validation must not require Cloudflare tokens, remote resources, preview deployments, or writes to the real Cloudflare account.
 
 Add these package scripts:
 
@@ -688,13 +688,14 @@ Add these package scripts:
     "test:worker:indexer": "vitest run --config vitest.worker.indexer.config.ts",
     "test:worker:ingress": "vitest run --config vitest.worker.ingress.config.ts",
     "test:worker": "npm run test:worker:indexer && npm run test:worker:ingress",
-    "test:integration": "vitest run tests/integration && npm run test:worker",
-    "test:e2e:preview": "tsx scripts/validate-r2-index-preview.ts"
+    "test:e2e": "npm run test:worker",
+    "test:e2e:offline": "npm run test:worker",
+    "test:integration": "vitest run tests/integration && npm run test:worker"
   }
 }
 ```
 
-If no test runner exists yet, add Vitest. For Worker behavior, use Cloudflare's Workers Vitest integration (`@cloudflare/vitest-pool-workers`) rather than hand-rolled mocks. Cloudflare's integration runs tests locally in the Workers runtime using Miniflare, exposes bindings, supports isolated per-test-file storage, and provides helpers for `queue()` and `scheduled()` handlers.
+If no test runner exists yet, add Vitest. For Worker behavior, use Cloudflare's Workers Vitest integration (`@cloudflare/vitest-pool-workers`) rather than remote preview tests. Cloudflare's integration runs tests locally in the Workers runtime using Miniflare, exposes local bindings, supports isolated per-test-file storage, and provides helpers for `queue()` and `scheduled()` handlers.
 
 Add test dependencies in the implementation PR:
 
@@ -835,9 +836,9 @@ tests/integration/ingress-listing.test.ts
   - assert no R2 bucket method is called when INDEX_LIVE_FALLBACK is false
 ```
 
-### Local Worker E2E tests
+### Offline local Worker E2E tests
 
-Use Cloudflare's `cloudflare:test` helpers for local Worker E2E coverage:
+Use Cloudflare's `cloudflare:test` helpers for offline local Worker E2E coverage. These tests run against Miniflare-local D1/R2/KV/Queue bindings and must not call Wrangler remote commands or deployed Workers:
 
 ```text
 tests/worker/indexer-queue.test.ts
@@ -869,26 +870,11 @@ tests/worker/ingress-fetch.test.ts
 
 Use `createMessageBatch()`, `createScheduledController()`, `createExecutionContext()`, `getQueueResult()`, and `waitOnExecutionContext()` from `cloudflare:test`. Use `env` from `cloudflare:workers` for local D1, R2, KV, and Queue bindings.
 
-### Preview smoke checklist
+### Optional operator smoke checklist
 
-Local Worker E2E is required. Preview validation is only a smoke test for Cloudflare-managed wiring that cannot be fully proven locally, especially actual R2 event notification rules. It should run against temporary preview resources or a non-production prefix and must not mutate production object prefixes.
+Do not automate this checklist in CI and do not make it a merge requirement. It is optional manual validation for an operator who already has local Cloudflare credentials and wants to verify platform-managed R2 notification rules after deployment.
 
-Required preview smoke flow:
-
-```text
-1. Deploy ingress Worker and indexer Worker to preview.
-2. Apply D1 migrations to preview D1.
-3. Set E2E_BUCKET_NAME and E2E_PUBLIC_BASE_URL.
-4. Run npm run test:e2e:preview.
-5. The script uploads a fixture under __r2-index-test/{runId}/.
-6. The script waits until the R2 create notification indexes the object in D1.
-7. The script requests the public directory URL and asserts the fixture is listed.
-8. The script deletes the fixture object.
-9. The script waits until the R2 delete notification removes the D1 object row.
-10. The script cleans up the R2 object and D1 test rows.
-```
-
-Real bucket event notification delivery should be validated once per environment after Cloudflare notification rules are configured:
+Real bucket event notification delivery can be spot-checked once per environment after Cloudflare notification rules are configured:
 
 ```text
 1. Upload a tiny object to the isolated test prefix.
@@ -907,15 +893,14 @@ Implementation acceptance criteria:
 4. `wrangler d1 migrations apply r2-index-kai-index --local` succeeds.
 5. `npm run test:unit` succeeds.
 6. `npm run test:integration` succeeds.
-7. `npm run test:worker` succeeds using Cloudflare's Workers Vitest integration.
-8. `npm run test:e2e:preview` succeeds for preview resources, or the PR includes the completed manual preview smoke checklist output.
-9. Prefix helper tests cover root, single-level, nested, Unicode, and no-slash keys.
-10. R2 event normalization tests cover PutObject, CopyObject, CompleteMultipartUpload, DeleteObject, and LifecycleDeletion.
-11. Synthetic create event upserts an object row and dirties all ancestor folders.
-12. Synthetic delete event deletes the object row and dirties old ancestor folders.
-13. A full-scan page with a deleted object skips it after `head()` returns null.
-14. Ingress directory loader reads from D1 and does not call `bucket.list()` when `INDEX_LIVE_FALLBACK` is false.
-15. The PR effective diff has no direct request-time folder-size scan implementation.
+7. `npm run test:e2e:offline` succeeds using Cloudflare's Workers Vitest integration and local Miniflare bindings.
+8. Prefix helper tests cover root, single-level, nested, Unicode, and no-slash keys.
+9. R2 event normalization tests cover PutObject, CopyObject, CompleteMultipartUpload, DeleteObject, and LifecycleDeletion.
+10. Synthetic create event upserts an object row and dirties all ancestor folders.
+11. Synthetic delete event deletes the object row and dirties old ancestor folders.
+12. A full-scan page with a deleted object skips it after `head()` returns null.
+13. Ingress directory loader reads from D1 and does not call `bucket.list()` when `INDEX_LIVE_FALLBACK` is false.
+14. The PR effective diff has no direct request-time folder-size scan implementation.
 ```
 
 ## Prefix rules
