@@ -5,7 +5,6 @@ import {
   getFilteredRowModel,
   getSortedRowModel,
   type SortDirection,
-  type SortingFn,
   type SortingState,
   useReactTable,
 } from '@tanstack/react-table'
@@ -23,6 +22,11 @@ import { Link } from 'react-router'
 import { useMemo, useState, type ReactNode } from 'react'
 
 import { DataType, type FileListing } from './model'
+import {
+  defaultFileListingSorting,
+  sortByNumber,
+  sortByString,
+} from './sorting'
 import { filterValue } from './states'
 
 import {
@@ -73,39 +77,6 @@ const getSortedIcon = (direction: false | SortDirection): ReactNode => {
     return <ArrowUp className="inline-block" />
   }
   return <ArrowDown className="inline-block" />
-}
-
-const sortByNumber: SortingFn<FileListing> = (rowA, rowB, columnId) => {
-  if (rowA.original.type !== rowB.original.type) {
-    return rowA.original.type === DataType.Folder ? 1 : -1
-  }
-  const valueA = rowA.getValue<number | undefined>(columnId)
-  const valueB = rowB.getValue<number | undefined>(columnId)
-
-  if (valueA === valueB) {
-    return 0
-  }
-  if (valueA === undefined) {
-    return 1
-  }
-  if (valueB === undefined) {
-    return -1
-  }
-
-  return valueA < valueB ? 1 : -1
-}
-
-const sortByString: SortingFn<FileListing> = (rowA, rowB, columnId) => {
-  if (rowA.original.type !== rowB.original.type) {
-    return rowA.original.type === DataType.Folder ? 1 : -1
-  }
-
-  return rowA
-    .getValue<string>(columnId)
-    .localeCompare(rowB.getValue<string>(columnId), 'en', {
-      sensitivity: 'base',
-      numeric: true,
-    })
 }
 
 const renderTimestamp = (timestamp?: number) => {
@@ -179,7 +150,9 @@ export const IndexTable = ({ data }: TableProps) => {
     [],
   )
 
-  const [sorting, setSorting] = useState<SortingState>([])
+  const [sorting, setSorting] = useState<SortingState>(
+    defaultFileListingSorting,
+  )
 
   const columnFilters = useMemo(() => [{ id: 'key', value }], [value])
 
