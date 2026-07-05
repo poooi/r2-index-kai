@@ -14,8 +14,13 @@ import {
   BreadcrumbList,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import { getBucketIndexStatus, listIndexedDirectory } from "@/lib/index-db";
 import { getSite } from "@/lib/sites";
 import { getBucketDataCacheKey, listBucket } from "@/lib/cf";
+import type { IngressEnv } from "~/env";
+
+const isLiveFallbackEnabled = (env: IngressEnv) =>
+  env.INDEX_LIVE_FALLBACK === "true";
 
 export const loader = async ({
   request,
@@ -28,7 +33,8 @@ export const loader = async ({
   }
 
   const cfContext = await context.cloudflare;
-  const site = getSite(cfContext.env, host);
+  const env = cfContext.env as IngressEnv;
+  const site = getSite(env, host);
 
   let { "*": splats = "" } = params;
   if (splats.endsWith("/")) {
@@ -45,26 +51,36 @@ export const loader = async ({
   if (cached !== null) {
     result = JSON.parse(cached) as FileListing[];
   } else {
-    const listResult = await listBucket(site.bucket, {
-      prefix,
-      delimiter: "/",
-      include: ["httpMetadata", "customMetadata"],
-    });
+    const db = env.R2_INDEX_DB.withSession("first-unconstrained");
+    const indexStatus = await getBucketIndexStatus(db, site.bucketName);
 
-    result = [
-      ...listResult.delimitedPrefixes.map((delimitedPrefix) => ({
-        key: delimitedPrefix,
-        href: `/${delimitedPrefix}`,
-        type: DataType.Folder,
-      })),
-      ...listResult.objects.map((object) => ({
-        key: object.key,
-        href: `/${object.key}`,
-        type: DataType.File,
-        size: object.size,
-        modified: object.uploaded.getTime(),
-      })),
-    ] satisfies FileListing[];
+    if (indexStatus === "ready") {
+      result = await listIndexedDirectory(db, site.bucketName, prefix);
+    } else if (isLiveFallbackEnabled(env)) {
+      const listResult = await listBucket(site.bucket, {
+        prefix,
+        delimiter: "/",
+        include: ["httpMetadata", "customMetadata"],
+      });
+
+      result = [
+        ...listResult.delimitedPrefixes.map((delimitedPrefix) => ({
+          key: delimitedPrefix,
+          href: `/${delimitedPrefix}`,
+          type: DataType.Folder,
+        })),
+        ...listResult.objects.map((object) => ({
+          key: object.key,
+          href: `/${object.key}`,
+          type: DataType.File,
+          size: object.size,
+          created: object.uploaded.getTime(),
+          modified: object.uploaded.getTime(),
+        })),
+      ] satisfies FileListing[];
+    } else {
+      throw data("index not ready", { status: 503 });
+    }
     cfContext.ctx.waitUntil(
       cfContext.env.R2_INDEX_CACHE.put(
         getBucketDataCacheKey(splats, host),
@@ -76,7 +92,7 @@ export const loader = async ({
     );
   }
 
-  if (result.length === 0) {
+  if (result.length === 0 && prefix !== "") {
     throw data(null, { status: 404 });
   }
 

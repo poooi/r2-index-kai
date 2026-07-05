@@ -8,5 +8,6 @@ export enum DataType {
     href: string
     type: DataType
     size?: number
+    created?: number
     modified?: number
   }

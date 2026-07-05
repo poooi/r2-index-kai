@@ -259,7 +259,7 @@ The ingress Worker uses `bucketName` for D1 queries and `bucket` only for direct
 
 ## D1 schema
 
-Add `migrations/0001_index.sql`:
+Generate the first migration from `shared/db/schema.ts` with `npm run db:generate` and commit the generated SQL under `migrations/`.
 
 All timestamp columns (`*_at`, `uploaded_at`, `created_at`, `modified_at`, `generation`, `lease_expires_at`) use Unix epoch milliseconds. Use `Date.now()` for generated timestamps and `R2Object.uploaded.getTime()` for R2 object upload timestamps. Do not mix seconds and milliseconds.
 
@@ -299,6 +299,7 @@ CREATE TABLE folders (
   parent_prefix TEXT,
   name TEXT NOT NULL,
   explicit_marker INTEGER NOT NULL DEFAULT 0,
+  marker_seen_generation INTEGER NOT NULL DEFAULT 0,
   size INTEGER NOT NULL DEFAULT 0,
   total_file_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER,
@@ -995,7 +996,7 @@ name = "b"
 ancestors = ["", "a/"]
 ```
 
-Folder-marker objects are not inserted into `objects`, do not contribute to `size`, and do not increment `total_file_count`. They only set `folders.explicit_marker = 1` so intentionally empty folders can be listed. Deleting a folder-marker object sets `explicit_marker = 0`; the folder row is deleted only if `total_file_count = 0` and there are no child folders.
+Folder-marker objects are not inserted into `objects`, do not contribute to `size`, and do not increment `total_file_count`. They only set `folders.explicit_marker = 1` and `folders.marker_seen_generation = current generation` so intentionally empty folders can be listed and full scans can repair deleted markers. Deleting a folder-marker object sets `explicit_marker = 0`; the folder row is deleted only if `total_file_count = 0` and there are no child folders.
 
 Folder metadata definitions:
 

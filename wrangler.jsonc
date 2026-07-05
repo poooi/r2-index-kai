@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "r2-index-kai",
+  "account_id": "2dc3483aa62d4b5dc774ec04713893de",
   "compatibility_date": "2025-04-04",
   "main": "./workers/app.ts",
   "r2_buckets": [
@@ -11,6 +12,14 @@
     {
       "binding": "R2_INDEX_CACHE",
       "id": "4caf510805554a53968fe664289e0b98"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "R2_INDEX_DB",
+      "database_name": "r2-index-kai-index",
+      "database_id": "7675010a-76bc-4bc8-9b3c-39cf252fbe55",
+      "migrations_dir": "migrations"
     }
   ],
   "routes": [
