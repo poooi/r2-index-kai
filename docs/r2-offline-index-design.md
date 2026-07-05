@@ -153,7 +153,7 @@ The existing `wrangler.jsonc` should keep current R2 and KV bindings and add the
   "kv_namespaces": [
     {
       "binding": "R2_INDEX_CACHE",
-      "id": "4caf510805554a53968fe664289e0b98"
+      "id": "<existing-r2-index-cache-kv-id>"
     }
   ],
   "d1_databases": [
@@ -170,6 +170,8 @@ The existing `wrangler.jsonc` should keep current R2 and KV bindings and add the
   ]
 }
 ```
+
+Keep the existing `R2_INDEX_CACHE` KV namespace ID from the current project config. The placeholder above is only for portability in the design document.
 
 ### Indexer Worker
 
@@ -335,7 +337,7 @@ CREATE INDEX index_runs_by_bucket_generation_kind
   ON index_runs(bucket, generation, kind);
 ```
 
-Root folder is represented by `prefix = ''` and `parent_prefix = NULL`.
+Root folder is represented by `prefix = ''`, `parent_prefix = NULL`, and `name = ''`.
 
 ## Database modeling recommendation
 
@@ -920,7 +922,7 @@ Implementation acceptance criteria:
 
 ## Prefix rules
 
-Use these helpers consistently:
+Use these helpers consistently. The snippets below show implementation logic; the real `shared/prefix.ts` module should export each helper to match the contracts above.
 
 ```ts
 const isFolderMarkerKey = (key: string) => {
