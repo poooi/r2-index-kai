@@ -33,4 +33,13 @@ describe('buildLiveFileListing', () => {
       },
     ])
   })
+
+  it('ignores marker objects that are not returned as delimited prefixes', () => {
+    expect(
+      buildLiveFileListing({
+        delimitedPrefixes: [],
+        objects: [createObject('a/')],
+      }),
+    ).toEqual([])
+  })
 })

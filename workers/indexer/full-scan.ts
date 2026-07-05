@@ -171,6 +171,7 @@ export const finishFullScan = async (
   bucket: BucketName,
   generation: number,
 ) => {
+  await extendScanLease(env, bucket, generation)
   await enqueueCleanupStalePage(env.R2_INDEX_SCAN_QUEUE, bucket, generation)
 }
 
@@ -178,6 +179,7 @@ export const cleanupStalePage = async (
   env: IndexerEnv,
   job: CleanupStalePageJob,
 ) => {
+  await extendScanLease(env, job.bucket, job.generation)
   const bucketState = await env.R2_INDEX_DB
     .prepare(
       `
@@ -264,6 +266,7 @@ export const finalizeFullScan = async (
   env: IndexerEnv,
   job: FinalizeFullScanJob,
 ) => {
+  await extendScanLease(env, job.bucket, job.generation)
   const dirtyFolder = await env.R2_INDEX_DB
     .prepare(
       `

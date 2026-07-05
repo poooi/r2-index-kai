@@ -29,12 +29,6 @@ const isLiveFallbackEnabled = (env: IngressEnv) =>
   env.INDEX_LIVE_FALLBACK === "true";
 
 const getIndexStatus = async (env: IngressEnv, bucketName: BucketName) => {
-  const replicaDb = env.R2_INDEX_DB.withSession("first-unconstrained");
-  const replicaStatus = await getBucketIndexStatus(replicaDb, bucketName);
-  if (replicaStatus === "ready") {
-    return replicaStatus;
-  }
-
   const primaryDb = env.R2_INDEX_DB.withSession("first-primary");
   return getBucketIndexStatus(primaryDb, bucketName);
 };

@@ -206,7 +206,7 @@ Add `wrangler.indexer.jsonc`:
         "max_batch_timeout": 10,
         "max_retries": 5,
         "dead_letter_queue": "r2-index-kai-events-dlq",
-        "max_concurrency": 4
+        "max_concurrency": 1
       },
       {
         "queue": "r2-index-kai-scan",
@@ -229,7 +229,7 @@ Add `wrangler.indexer.jsonc`:
 
 R2 writes directly to `r2-index-kai-events`, so the indexer does not need a producer binding for that queue. The indexer does need `R2_INDEX_SCAN_QUEUE` so cron and event handlers can enqueue bounded scan/recompute jobs.
 
-Queue concurrency is intentionally capped because the shared D1 database is single-threaded. Events may run with limited parallelism because each event re-checks current R2 state with `bucket.head()`. Scan and recompute jobs run with `max_concurrency: 1` so full-scan finalization, stale cleanup, and large folder recomputes cannot overlap each other.
+Queue concurrency is intentionally capped because the shared D1 database is single-threaded and folder aggregate deltas must be serialized. Event, scan, and recompute jobs run with `max_concurrency: 1` so duplicate events, full-scan finalization, stale cleanup, and large folder recomputes cannot overlap each other.
 
 This design assumes Workers Paid for production-sized buckets. Workers Free limits are useful for development, but the indexer can exceed Free-tier subrequest/query limits when scanning R2 and writing D1. Keep scan pages bounded anyway so one invocation remains small and retryable.
 
@@ -1060,7 +1060,7 @@ This design depends on these Cloudflare-documented constraints:
 | R2 list API | `list()` returns at most 1000 objects, may return fewer, and pagination must use `truncated` and `cursor`. | Full scan jobs always advance by cursor and never infer completion from object count. |
 | Queues | Max consumer batch size is 100; consumer wall time is 15 minutes; default CPU is lower unless configured. | Use separate queues, `max_batch_size: 1` for scan jobs, and `limits.cpu_ms: 300000` on the indexer. |
 | D1 | One database is single-threaded, max size is 10 GB on Workers Paid, max query duration is 30 seconds, max bound parameters per query is 100, and query count per Worker invocation is limited. | Keep D1 writes bounded, remove the `object_ancestors` table, chunk recomputes, and use KV/read replication for hot listing reads if needed. |
-| D1 read replication | Read replicas are only used through the Sessions API. | Ingress listing reads should use `R2_INDEX_DB.withSession('first-unconstrained')` after the index is ready. |
+| D1 read replication | Read replicas are only used through the Sessions API. | Ingress should read operational readiness from `first-primary`, then use `R2_INDEX_DB.withSession('first-unconstrained')` for directory listing rows after the index is ready. |
 | Queue acknowledgement | Messages are acknowledged when the `queue()` handler resolves; individual messages can also call `ack()` or `retry()`. | Process event messages independently and explicitly `ack()` only after D1 writes plus scan-job enqueue succeed. |
 
 If either bucket's estimated index approaches 5 GB or D1 overload errors appear during scans, split into one D1 database per bucket before adding more features.

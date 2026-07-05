@@ -1,17 +1,12 @@
 import { DataType, type FileListing } from '@/components/file-listing/model'
-import { getFolderMarkerPrefix, isFolderMarkerKey } from '~/prefix'
+import { isFolderMarkerKey } from '~/prefix'
 
 type R2ListForListing = Pick<R2Objects, 'delimitedPrefixes' | 'objects'>
 
 export const buildLiveFileListing = (
   listResult: R2ListForListing,
 ): FileListing[] => {
-  const folderKeys = new Set([
-    ...listResult.delimitedPrefixes,
-    ...listResult.objects
-      .filter((object) => isFolderMarkerKey(object.key))
-      .map((object) => getFolderMarkerPrefix(object.key)),
-  ])
+  const folderKeys = new Set(listResult.delimitedPrefixes)
 
   return [
     ...[...folderKeys].map((folderKey) => ({

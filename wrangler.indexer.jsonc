@@ -27,7 +27,7 @@
         "max_batch_timeout": 10,
         "max_retries": 5,
         "dead_letter_queue": "r2-index-kai-events-dlq",
-        "max_concurrency": 4
+        "max_concurrency": 1
       },
       {
         "queue": "r2-index-kai-scan",
