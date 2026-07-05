@@ -1,6 +1,6 @@
 import { isBucketName, type BucketName } from '../../shared/buckets'
 import type { IndexerEnv } from '../../shared/env'
-import { isFolderMarkerKey } from '../../shared/prefix'
+import { getAncestorPrefixes, isFolderMarkerKey } from '../../shared/prefix'
 
 import { enqueueRecomputeFolders } from './jobs'
 import { getIndexerBucket } from './buckets'
@@ -177,6 +177,9 @@ const handleDelete = async (env: IndexerEnv, event: R2EventNotification) => {
       0,
       Date.now(),
     )
+    for (const prefix of getAncestorPrefixes(event.object.key).reverse()) {
+      await deleteEmptyFolder(env.R2_INDEX_DB, event.bucket, prefix)
+    }
     await updateLastEventAt(env, event.bucket)
     return
   }

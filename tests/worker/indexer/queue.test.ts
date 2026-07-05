@@ -159,4 +159,50 @@ INSERT INTO objects (
       .first<{ needs_recompute: number }>()
     expect(rootFolder?.needs_recompute).toBe(1)
   })
+
+  it('prunes empty ancestor folders after deleting a folder marker', async () => {
+    const now = Date.now()
+    await env.R2_INDEX_DB.batch([
+      env.R2_INDEX_DB.prepare(
+        `
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, explicit_marker, marker_seen_generation, size, total_file_count, created_at, modified_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+      ).bind('poi-db', 'a/', '', 'a', 0, 0, 0, 0, null, null, now),
+      env.R2_INDEX_DB.prepare(
+        `
+INSERT INTO folders (
+  bucket, prefix, parent_prefix, name, explicit_marker, marker_seen_generation, size, total_file_count, created_at, modified_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`,
+      ).bind('poi-db', 'a/b/', 'a/', 'b', 1, now, 0, 0, null, null, now),
+    ])
+    const testEnv = createTestEnv()
+    const batch = createMessageBatch('r2-index-kai-events', [
+      {
+        id: 'message-1',
+        timestamp: new Date(1000),
+        attempts: 1,
+        body: {
+          action: 'DeleteObject',
+          bucket: 'poi-db',
+          object: { key: 'a/b/' },
+          eventTime: new Date(1000).toISOString(),
+        },
+      },
+    ])
+    const ctx = createExecutionContext()
+
+    await worker.queue(batch, testEnv.env, ctx)
+
+    const queueResult = await getQueueResult(batch, ctx)
+    expect(queueResult.explicitAcks).toEqual(['message-1'])
+    const folders = await env.R2_INDEX_DB.prepare(
+      'SELECT prefix FROM folders WHERE bucket = ? ORDER BY prefix',
+    )
+      .bind('poi-db')
+      .all<{ prefix: string }>()
+    expect(folders.results).toEqual([{ prefix: '' }])
+  })
 })
