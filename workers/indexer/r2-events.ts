@@ -86,8 +86,9 @@ const getActiveGeneration = async (env: IndexerEnv, bucket: BucketName) => {
   return row?.status === 'scanning' ? row.generation : 0
 }
 
-const updateLastEventAt = (env: IndexerEnv, bucket: BucketName) =>
-  env.R2_INDEX_DB
+const updateLastEventAt = (env: IndexerEnv, bucket: BucketName) => {
+  const now = Date.now()
+  return env.R2_INDEX_DB
     .prepare(
       `
 INSERT INTO index_buckets (bucket, updated_at, last_event_at)
@@ -97,8 +98,9 @@ ON CONFLICT(bucket) DO UPDATE SET
   updated_at = excluded.updated_at
 `,
     )
-    .bind(bucket, Date.now(), Date.now())
+    .bind(bucket, now, now)
     .run()
+}
 
 const getEventDrivenRecomputePrefixes = (prefixes: string[]) =>
   prefixes.filter((prefix) => prefix !== '')

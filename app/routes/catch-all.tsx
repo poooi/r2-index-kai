@@ -26,6 +26,17 @@ import type { IngressEnv } from "~/env";
 const isLiveFallbackEnabled = (env: IngressEnv) =>
   env.INDEX_LIVE_FALLBACK === "true";
 
+const getIndexStatus = async (env: IngressEnv, bucketName: string) => {
+  const replicaDb = env.R2_INDEX_DB.withSession("first-unconstrained");
+  const replicaStatus = await getBucketIndexStatus(replicaDb, bucketName);
+  if (replicaStatus === "ready") {
+    return replicaStatus;
+  }
+
+  const primaryDb = env.R2_INDEX_DB.withSession("first-primary");
+  return getBucketIndexStatus(primaryDb, bucketName);
+};
+
 export const loader = async ({
   request,
   context,
@@ -55,8 +66,7 @@ export const loader = async ({
   if (cached !== null) {
     result = JSON.parse(cached) as FileListing[];
   } else {
-    const primaryDb = env.R2_INDEX_DB.withSession("first-primary");
-    const indexStatus = await getBucketIndexStatus(primaryDb, site.bucketName);
+    const indexStatus = await getIndexStatus(env, site.bucketName);
 
     if (indexStatus === "ready") {
       const db = env.R2_INDEX_DB.withSession("first-unconstrained");

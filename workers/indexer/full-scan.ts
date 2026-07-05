@@ -49,9 +49,10 @@ LIMIT 1
   }
 
   const generation = now
-  await env.R2_INDEX_DB
-    .prepare(
-      `
+  await env.R2_INDEX_DB.batch([
+    env.R2_INDEX_DB
+      .prepare(
+        `
 INSERT INTO index_buckets (
   bucket, status, generation, last_scan_started_at, updated_at
 ) VALUES (?, 'scanning', ?, ?, ?)
@@ -61,20 +62,25 @@ ON CONFLICT(bucket) DO UPDATE SET
   last_scan_started_at = excluded.last_scan_started_at,
   updated_at = excluded.updated_at
 `,
-    )
-    .bind(bucket, generation, now, now)
-    .run()
-
-  await env.R2_INDEX_DB
-    .prepare(
-      `
+      )
+      .bind(bucket, generation, now, now),
+    env.R2_INDEX_DB
+      .prepare(
+        `
 INSERT INTO index_runs (
   id, bucket, kind, generation, status, lease_expires_at, started_at, updated_at
 ) VALUES (?, ?, 'full-scan', ?, 'running', ?, ?, ?)
 `,
-    )
-    .bind(getRunId(bucket, generation), bucket, generation, now + 15 * 60_000, now, now)
-    .run()
+      )
+      .bind(
+        getRunId(bucket, generation),
+        bucket,
+        generation,
+        now + 15 * 60_000,
+        now,
+        now,
+      ),
+  ])
 
   await enqueueFullScan(env.R2_INDEX_SCAN_QUEUE, bucket, generation)
 }
